@@ -108,7 +108,7 @@ struct PopoverView: View {
                 Image(systemName: "power")
             }
             .buttonStyle(.plain)
-            .help("Quit CClimit")
+            .help("Quit cclimit")
         }
     }
 }

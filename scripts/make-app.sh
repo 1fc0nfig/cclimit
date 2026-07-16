@@ -1,5 +1,5 @@
 #!/bin/bash
-# Assemble a runnable CClimit.app from the SPM build product.
+# Assemble a runnable cclimit.app from the SPM build product.
 # Ad-hoc signed for local development; Developer ID signing comes later (docs/PLAN.md).
 set -euo pipefail
 
@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Sparkle shows CFBundleShortVersionString and orders updates by CFBundleVersion.
 VERSION="${VERSION:-0.1.0}"
 BUILD="${BUILD:-$VERSION}"
-APP="$ROOT/build/CClimit.app"
+APP="$ROOT/build/cclimit.app"
 
 # Sparkle: the appcast the app polls, and the public half of the EdDSA update-signing key.
 # The private half lives only in the release machine's login Keychain (never committed).
@@ -22,25 +22,30 @@ swift build -c "$CONFIG"
 BIN="$(swift build -c "$CONFIG" --show-bin-path)/CClimit"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
-cp "$BIN" "$APP/Contents/MacOS/CClimit"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN" "$APP/Contents/MacOS/cclimit"
+
+# App icon (Finder, Dock-if-shown, About box). Built from assets/brand/app-icon-1024.png.
+cp "$ROOT/assets/brand/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 # Embed Sparkle.framework (with its Autoupdate + Updater.app + XPC helpers) and point the
 # executable at it. install_name_tool tolerates a pre-existing rpath, so ignore that error.
 mkdir -p "$APP/Contents/Frameworks"
 ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
-install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CClimit" 2>/dev/null || true
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/cclimit" 2>/dev/null || true
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleExecutable</key><string>CClimit</string>
+	<key>CFBundleExecutable</key><string>cclimit</string>
 	<key>CFBundleIdentifier</key><string>com.cernymatyas.cclimit</string>
-	<key>CFBundleName</key><string>CClimit</string>
-	<key>CFBundleDisplayName</key><string>CClimit</string>
+	<key>CFBundleName</key><string>cclimit</string>
+	<key>CFBundleDisplayName</key><string>cclimit</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleIconFile</key><string>AppIcon</string>
+	<key>CFBundleIconName</key><string>AppIcon</string>
 	<key>CFBundleShortVersionString</key><string>$VERSION</string>
 	<key>CFBundleVersion</key><string>$BUILD</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>

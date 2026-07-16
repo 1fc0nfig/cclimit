@@ -25,9 +25,9 @@ enum Health: Equatable {
         case .noCredentials:
             return "No Claude Code credentials found. Install Claude Code and run `claude` once to log in."
         case .credentialAccessDenied:
-            return "Keychain access was denied. CClimit only reads the token Claude Code already stores — re-grant access, or log in via `claude` to create ~/.claude/.credentials.json."
+            return "Keychain access was denied. cclimit only reads the token Claude Code already stores — re-grant access, or log in via `claude` to create ~/.claude/.credentials.json."
         case .unauthorized:
-            return "Token expired. Use `claude` once to refresh it — CClimit picks it up automatically."
+            return "Token expired. Use `claude` once to refresh it — cclimit picks it up automatically."
         case .forbidden:
             return "This token can't read usage (missing user:profile scope). Log in with `claude`, not `claude setup-token`."
         case .rateLimited:
@@ -35,7 +35,7 @@ enum Health: Equatable {
         case .offline:
             return "Network unreachable."
         case .schemaChanged:
-            return "The usage API changed shape — check for a CClimit update."
+            return "The usage API changed shape — check for a cclimit update."
         }
     }
 }

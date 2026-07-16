@@ -1,10 +1,16 @@
-# CClimit
+<p align="center">
+  <img src="assets/brand/app-icon-1024.png" width="120" alt="cclimit" />
+</p>
 
-**Know before you hit the wall.** A native macOS menu bar gauge for Claude Code usage
-limits — the 5-hour window, the weekly cap, and a forecast of when you'll run out at
-your current pace.
+<h1 align="center">cclimit</h1>
 
-Unlike usage trackers that report the present, CClimit forecasts the wall:
+<p align="center"><b>Know before you hit the wall.</b><br>
+A native macOS menu bar gauge for Claude Code usage limits — the 5-hour window, the
+weekly cap, and a forecast of when you'll run out at your current pace.</p>
+
+---
+
+Unlike usage trackers that report the present, cclimit forecasts the wall:
 
 - **5-hour window** — while you're actually burning, it answers the real question:
   *"At this pace: wall in ~40 min — before reset (1 h 10 m)."* When you're idle it stays
@@ -17,7 +23,7 @@ Unlike usage trackers that report the present, CClimit forecasts the wall:
 
 ## How it works
 
-CClimit reads the OAuth token Claude Code already stores (macOS Keychain, service
+cclimit reads the OAuth token Claude Code already stores (macOS Keychain, service
 `Claude Code-credentials`, or `~/.claude/.credentials.json`) and polls the same
 endpoint that powers Claude Code's own `/usage` command. Server-side authoritative —
 correct across devices.
@@ -36,13 +42,13 @@ that's the OS confirming exactly the access described above.
 
 **Honesty note:** the usage endpoint is undocumented and this use of Claude Code OAuth
 tokens (read-only usage metadata, your own token, your own machine) is a gray zone under
-Anthropic's third-party token policy. CClimit degrades gracefully if the endpoint
+Anthropic's third-party token policy. cclimit degrades gracefully if the endpoint
 changes; it will never silently show stale data as fresh. Not affiliated with Anthropic.
 
 ## Install
 
-Download `CClimit-<version>.dmg` from the [latest release](https://github.com/1fc0nfig/cclimit/releases/latest),
-open it, and drag **CClimit** to Applications.
+Download `cclimit-<version>.dmg` from the [latest release](https://github.com/1fc0nfig/cclimit/releases/latest),
+open it, and drag **cclimit** to Applications.
 
 > This build is not yet Apple-notarized, so on first launch macOS Gatekeeper will say it
 > "cannot be checked for malicious software." Right-click the app → **Open** → **Open** to
@@ -58,10 +64,10 @@ Requires Xcode 15+ / Swift 5.9+ on macOS 14+.
 
 ```bash
 make test      # unit tests (decoding, forecast, backoff, attribution)
-make app       # assemble build/CClimit.app (debug, ad-hoc signed)
+make app       # assemble build/cclimit.app (debug, ad-hoc signed)
 make run       # build + launch the menu bar app
 make release   # release-configuration bundle
-make dmg       # build a distributable dist/CClimit-<version>.dmg
+make dmg       # build a distributable dist/cclimit-<version>.dmg
 ```
 
 `swift run` also works for quick iterations, but notifications, launch-at-login, and

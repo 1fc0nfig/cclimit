@@ -1,6 +1,6 @@
-# Releasing CClimit
+# Releasing cclimit
 
-CClimit auto-updates via [Sparkle](https://sparkle-project.org). A release is: a signed
+cclimit auto-updates via [Sparkle](https://sparkle-project.org). A release is: a signed
 `.app`, packaged as a `.zip` (for the updater) and a `.dmg` (for first-time install), plus
 an `appcast.xml` that points at the zip and carries its EdDSA signature.
 
@@ -16,15 +16,15 @@ an `appcast.xml` that points at the zip and carries its EdDSA signature.
 ## Cut a release
 
 ```bash
-VERSION=0.2.0 make dmg          # dist/CClimit-0.2.0.dmg  (drag-install image)
-VERSION=0.2.0 scripts/release.sh # dist/CClimit-0.2.0.zip + dist/appcast.xml (signed)
+VERSION=0.2.0 make dmg          # dist/cclimit-0.2.0.dmg  (drag-install image)
+VERSION=0.2.0 scripts/release.sh # dist/cclimit-0.2.0.zip + dist/appcast.xml (signed)
 ```
 
 Then publish:
 
 1. **Binaries → GitHub Releases** (the appcast enclosure URL points here):
    ```bash
-   gh release create v0.2.0 dist/CClimit-0.2.0.dmg dist/CClimit-0.2.0.zip \
+   gh release create v0.2.0 dist/cclimit-0.2.0.dmg dist/cclimit-0.2.0.zip \
      --repo 1fc0nfig/cclimit --title "v0.2.0" --notes "…"
    ```
 2. **Appcast → cclimit.app**: copy `dist/appcast.xml` to `cclimit-web/public/appcast.xml`

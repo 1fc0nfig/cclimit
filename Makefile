@@ -19,7 +19,7 @@ dmg:
 	scripts/make-dmg.sh
 
 run: app
-	open build/CClimit.app
+	open build/cclimit.app
 
 clean:
 	rm -rf .build build dist

@@ -21,8 +21,8 @@ BUILD="${BUILD:-$VERSION}"
 GH_REPO="1fc0nfig/cclimit"
 
 DIST="$ROOT/dist"
-APP="$ROOT/build/CClimit.app"
-ZIP="$DIST/CClimit-$VERSION.zip"
+APP="$ROOT/build/cclimit.app"
+ZIP="$DIST/cclimit-$VERSION.zip"
 APPCAST="$DIST/appcast.xml"
 SIGN_UPDATE="$ROOT/.build/artifacts/sparkle/Sparkle/bin/sign_update"
 
@@ -38,7 +38,7 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 # 3. Sign + measure the archive. sign_update prints: sparkle:edSignature="…" length="…"
 SIG_ATTRS="$("$SIGN_UPDATE" "$ZIP")"
 PUB_DATE="$(date -R)"
-URL="https://github.com/$GH_REPO/releases/download/v$VERSION/CClimit-$VERSION.zip"
+URL="https://github.com/$GH_REPO/releases/download/v$VERSION/cclimit-$VERSION.zip"
 
 # 4. Emit a single-item appcast for the newest build. Sparkle upgrades every older user to
 #    the top item, so one entry is enough; regenerate on each release.
@@ -46,7 +46,7 @@ cat > "$APPCAST" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
 	<channel>
-		<title>CClimit</title>
+		<title>cclimit</title>
 		<link>https://cclimit.app/appcast.xml</link>
 		<description>Menu bar usage gauge for Claude Code.</description>
 		<language>en</language>

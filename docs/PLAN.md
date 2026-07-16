@@ -1,4 +1,4 @@
-# CClimit — development plan
+# cclimit — development plan
 
 Derived from [product.md](product.md) after a brainstorm + deliberation pass (2026-07-15; state in
 `.deliberation/cclimit-shape/`). Settled calls baked in: **build** (hybrid — Claude God installed as
@@ -8,7 +8,7 @@ at v0.2**, **attribution stays v1.0 with prerequisites front-loaded**. Peak-hour
 > **Status 2026-07-15:** Matyas resolved the leaves — build everything at once, skip Phase 0
 > verification, no Apple Developer account yet (ad-hoc local signing for now). All three phases'
 > features are implemented in one pass: core gauge + forecast engine + attribution, 40 unit tests
-> green, `make run` produces a runnable ad-hoc-signed `build/CClimit.app`. **Validated live** — the
+> green, `make run` produces a runnable ad-hoc-signed `build/cclimit.app`. **Validated live** — the
 > endpoint returned 200 for Matyas's account and the full pipeline (Keychain → API → decode →
 > persist) works.
 >
@@ -16,7 +16,7 @@ at v0.2**, **attribution stays v1.0 with prerequisites front-loaded**. Peak-hour
 > doc's documented shape. It now carries a generic **`limits[]` array** — entries with
 > `kind` ∈ {session, weekly_all, weekly_scoped}, each `weekly_scoped` one carrying
 > `scope.model.display_name` (e.g. **Fable**). Legacy `seven_day_opus`/`_sonnet` fields still
-> exist but were null. CClimit parses `limits[]` generically, so any new model (Fable, Mythos, …)
+> exist but were null. cclimit parses `limits[]` generically, so any new model (Fable, Mythos, …)
 > appears automatically; per-model rows are individually toggleable in Settings, and an active
 > model cap correctly binds the menu bar icon. `cclimit-dump` is kept as a debug target.
 >
