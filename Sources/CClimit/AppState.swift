@@ -113,8 +113,14 @@ final class AppState: ObservableObject {
                 let decision = nextPoll(policy: self.policy, state: self.pollState)
                 switch decision {
                 case .paused:
+                    Log.poll.debug("paused (screen locked) — waiting for unlock")
                     await self.waitForWake()
                 case .poll(let interval):
+                    let reason = self.pollState.consecutiveRateLimits > 0
+                        ? "rate-limit backoff (429 ×\(self.pollState.consecutiveRateLimits))"
+                        : (self.pollState.consecutiveFailures > 0 ? "after failure" : "normal")
+                    Log.poll.notice(
+                        "next poll in \(Int(interval), privacy: .public)s · \(reason, privacy: .public)")
                     await self.sleepInterruptibly(interval)
                 }
             }
@@ -122,6 +128,24 @@ final class AppState: ObservableObject {
     }
 
     func refreshNow() {
+        Log.poll.notice("manual refresh")
+        wake()
+    }
+
+    /// Called when the popover opens. Fetches fresh data so the numbers reflect "now", not the
+    /// last background poll — but throttled, so rapid re-opens don't spam the probe, and
+    /// suppressed during an active rate-limit backoff so we never poke a live penalty.
+    func refreshOnOpen() {
+        let now = Date()
+        if pollState.consecutiveRateLimits > 0 {
+            Log.poll.debug("popover open · skip refresh (in rate-limit backoff)")
+            return
+        }
+        if let last = lastUpdated, now.timeIntervalSince(last) < 15 {
+            Log.poll.debug("popover open · skip refresh (updated \(Int(now.timeIntervalSince(last)), privacy: .public)s ago)")
+            return
+        }
+        Log.poll.notice("popover open · refreshing")
         wake()
     }
 
@@ -150,6 +174,8 @@ final class AppState: ObservableObject {
         do {
             // Primary: header-driven 5h + weekly. This is the poll that must not be starved.
             let probeSnap = try await probe.fetch(token: creds.accessToken)
+            Log.poll.notice(
+                "probe 200 · 5h=\(probeSnap.fiveHour?.utilization ?? -1, privacy: .public)% weekly=\(probeSnap.sevenDay?.utilization ?? -1, privacy: .public)%")
             let merged = await mergeWithPerModel(probeSnap, token: creds.accessToken, now: now)
             apply(snapshot: merged, at: now)
         } catch let error as UsageError {
@@ -157,8 +183,10 @@ final class AppState: ObservableObject {
                 // Token the store gave us is stale — drop it so the next cycle re-reads.
                 cachedCredentials = nil
             }
+            Log.poll.error("probe failed: \(String(describing: error), privacy: .public)")
             apply(error: error)
         } catch {
+            Log.poll.error("probe threw non-UsageError: \(String(describing: error), privacy: .public)")
             health = .offline
             pollState.recordFailure()
         }
@@ -175,9 +203,18 @@ final class AppState: ObservableObject {
         let due = lastPerModelFetch.map { now.timeIntervalSince($0) >= perModelRefreshInterval } ?? true
         if due {
             lastPerModelFetch = now
-            if let full = try? await client.fetch(token: token) {
+            do {
+                let full = try await client.fetch(token: token)
                 lastPerModelSnapshot = full
+                Log.poll.notice(
+                    "supplement 200 · models=[\(full.perModelWindows.map(\.name).joined(separator: ","), privacy: .public)]")
+            } catch {
+                Log.poll.notice(
+                    "supplement failed: \(String(describing: error), privacy: .public) · keeping \(self.lastPerModelSnapshot == nil ? "no" : "cached", privacy: .public) per-model data")
             }
+        } else {
+            let wait = Int(self.perModelRefreshInterval - now.timeIntervalSince(self.lastPerModelFetch ?? now))
+            Log.poll.debug("supplement skipped · next in ~\(wait, privacy: .public)s")
         }
         guard let supplement = lastPerModelSnapshot else { return probeSnap }
         // Header values win for 5h/weekly (always fresh); borrow only per-model + extra usage.
@@ -223,6 +260,8 @@ final class AppState: ObservableObject {
     private func apply(error: UsageError) {
         switch error {
         case .rateLimited(let retryAfter):
+            Log.poll.error(
+                "RATE LIMITED (429) · server Retry-After=\(retryAfter.map { String(Int($0)) } ?? "none", privacy: .public)s · consecutive=\(self.pollState.consecutiveRateLimits + 1, privacy: .public)")
             health = .rateLimited(retryAfter: retryAfter)
             pollState.recordRateLimit(retryAfter: retryAfter)
         case .unauthorized:

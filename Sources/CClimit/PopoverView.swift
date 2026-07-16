@@ -45,7 +45,10 @@ struct PopoverView: View {
         }
         .padding(14)
         .frame(width: 300)
-        .onAppear { state.refreshAttributionIfStale() }
+        .onAppear {
+            state.refreshOnOpen()
+            state.refreshAttributionIfStale()
+        }
     }
 
     /// Forecast and attribution get a divider above them; window rows flow together.
