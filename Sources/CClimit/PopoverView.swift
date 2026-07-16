@@ -73,7 +73,8 @@ struct PopoverView: View {
                     WindowRow(
                         title: "Weekly · \(model.name)",
                         window: model.window,
-                        badge: model.isActive ? "active" : nil)
+                        badge: model.isActive ? "active" : nil,
+                        note: state.perModelStaleNote)
                 } else {
                     // Seen in a prior run but absent from the current snapshot: the per-model
                     // supplement (usage endpoint) hasn't answered yet — often because it's
@@ -144,6 +145,8 @@ private struct WindowRow: View {
     let title: String
     let window: UsageWindow?
     var badge: String? = nil
+    /// Optional muted footnote, e.g. "updated 2h ago" when this row's data is stale.
+    var note: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -168,7 +171,11 @@ private struct WindowRow: View {
             }
             ProgressView(value: min(max(window?.utilization ?? 0, 0), 100), total: 100)
                 .tint(window.map { UsageColor.bar($0.utilization ?? 0) } ?? .gray)
-            if let reset = window?.resetsAt {
+            if let note {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else if let reset = window?.resetsAt {
                 Text("resets \(Format.resetStamp(reset)) · in \(Format.countdown(to: reset))")
                     .font(.caption)
                     .foregroundStyle(.secondary)

@@ -55,6 +55,9 @@ final class AppState: ObservableObject {
     @Published var weeklyForecasts: [WeeklyForecast] = []
     @Published var burns: [ProjectBurn] = []
     @Published var burnsUpdated: Date?
+    /// When the per-model (e.g. Fable) data was last fetched fresh from the usage endpoint.
+    /// May lag `lastUpdated` (the always-fresh probe) when that endpoint is rate limited.
+    @Published var perModelUpdated: Date?
 
     struct WeeklyForecast: Identifiable, Equatable {
         let name: String        // "Weekly cap" or a model name
@@ -77,10 +80,14 @@ final class AppState: ObservableObject {
     /// weekly breakdown the headers don't carry. Non-fatal — a 429 here just leaves per-model
     /// data stale; the header-driven 5h/weekly gauge keeps working.
     private let client = UsageClient(userAgentVersion: AppState.ua)
-    /// Minimum spacing between usage-endpoint supplement calls (respects its scarce budget).
+    /// Spacing between usage-endpoint supplement calls on success (respects its scarce budget).
+    /// On a 429 we wait the server's Retry-After instead; on other errors, idle pace.
     private let perModelRefreshInterval: TimeInterval = 15 * 60
+    private let perModelStore = PerModelStore()
     private var lastPerModelSnapshot: UsageSnapshot?
-    private var lastPerModelFetch: Date?
+    /// When the next supplement fetch is allowed. Driven by the outcome of the last one:
+    /// success → +interval, 429 → +Retry-After, other error → +idle. nil means fetch now.
+    private var perModelNextFetch: Date?
     private let credentials = ChainedCredentialSource()
     /// In-memory only (product.md §5). Caching also matters for UX: reading the Keychain
     /// item every poll re-triggers the consent prompt whenever Claude Code has rewritten
@@ -94,8 +101,25 @@ final class AppState: ObservableObject {
 
     private let defaults = UserDefaults.standard
 
+    init() {
+        // Hydrate per-model data from the last run so Fable et al. show immediately (stale,
+        // clearly stamped) instead of blank while the usage endpoint is rate limited.
+        if let cached = perModelStore.load() {
+            lastPerModelSnapshot = cached.snapshot
+            perModelUpdated = cached.ts
+        }
+    }
+
     /// Union of per-model window names ever seen (e.g. ["Fable"]), for Settings + layout.
     var seenModelNames: [String] { defaults.stringArray(forKey: "seenModels") ?? [] }
+
+    /// A note when per-model data is older than a refresh cycle (the usage endpoint has been
+    /// unavailable), so the rows read as "last known", not current. Nil while fresh.
+    var perModelStaleNote: String? {
+        guard let updated = perModelUpdated else { return nil }
+        guard Date().timeIntervalSince(updated) > perModelRefreshInterval + 120 else { return nil }
+        return "updated \(Format.staleness(since: updated))"
+    }
 
     var policy: PollPolicy {
         PollPolicy(
@@ -200,21 +224,33 @@ final class AppState: ObservableObject {
     private func mergeWithPerModel(
         _ probeSnap: UsageSnapshot, token: String, now: Date
     ) async -> UsageSnapshot {
-        let due = lastPerModelFetch.map { now.timeIntervalSince($0) >= perModelRefreshInterval } ?? true
+        let due = perModelNextFetch.map { now >= $0 } ?? true
         if due {
-            lastPerModelFetch = now
             do {
                 let full = try await client.fetch(token: token)
                 lastPerModelSnapshot = full
+                perModelUpdated = now
+                perModelStore.save(full, at: now)
+                perModelNextFetch = now.addingTimeInterval(perModelRefreshInterval)
                 Log.poll.notice(
                     "supplement 200 · models=[\(full.perModelWindows.map(\.name).joined(separator: ","), privacy: .public)]")
-            } catch {
+            } catch let error as UsageError {
+                // Honor the endpoint's own Retry-After on a 429 so Fable returns the moment the
+                // penalty lifts — not a blind 15 min later, and not by hammering it meanwhile.
+                let wait: TimeInterval
+                if case .rateLimited(let retryAfter) = error {
+                    wait = (retryAfter.map { min($0, PollPolicy.retryAfterCeiling) } ?? perModelRefreshInterval)
+                        + PollPolicy.retryAfterMargin
+                } else {
+                    wait = policy.idleInterval
+                }
+                perModelNextFetch = now.addingTimeInterval(wait)
                 Log.poll.notice(
-                    "supplement failed: \(String(describing: error), privacy: .public) · keeping \(self.lastPerModelSnapshot == nil ? "no" : "cached", privacy: .public) per-model data")
+                    "supplement \(String(describing: error), privacy: .public) · next in \(Int(wait), privacy: .public)s · keeping \(self.lastPerModelSnapshot == nil ? "no" : "cached", privacy: .public) data")
+            } catch {
+                perModelNextFetch = now.addingTimeInterval(policy.idleInterval)
+                Log.poll.notice("supplement failed: \(String(describing: error), privacy: .public)")
             }
-        } else {
-            let wait = Int(self.perModelRefreshInterval - now.timeIntervalSince(self.lastPerModelFetch ?? now))
-            Log.poll.debug("supplement skipped · next in ~\(wait, privacy: .public)s")
         }
         guard let supplement = lastPerModelSnapshot else { return probeSnap }
         // Header values win for 5h/weekly (always fresh); borrow only per-model + extra usage.
