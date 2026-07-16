@@ -43,6 +43,8 @@ public struct UsageClient: Sendable {
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue(userAgent(version: userAgentVersion), forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Axios default in Claude Code's client — matched so the fingerprint is identical.
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 15
         return request
     }
