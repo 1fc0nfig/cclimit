@@ -86,8 +86,11 @@ final class AppState: ObservableObject {
     private let perModelStore = PerModelStore()
     private var lastPerModelSnapshot: UsageSnapshot?
     /// When the next supplement fetch is allowed. Driven by the outcome of the last one:
-    /// success → +interval, 429 → +Retry-After, other error → +idle. nil means fetch now.
+    /// success → +interval, 429 → escalating backoff, other error → +idle. nil means fetch now.
     private var perModelNextFetch: Date?
+    /// Consecutive 429s from the usage endpoint — drives the escalating backoff, since each
+    /// contact re-triggers its penalty and retrying at a fixed cadence never lets it recover.
+    private var perModelConsecutive429 = 0
     private let credentials = ChainedCredentialSource()
     /// In-memory only (product.md §5). Caching also matters for UX: reading the Keychain
     /// item every poll re-triggers the consent prompt whenever Claude Code has rewritten
@@ -230,23 +233,34 @@ final class AppState: ObservableObject {
                 let full = try await client.fetch(token: token)
                 lastPerModelSnapshot = full
                 perModelUpdated = now
+                perModelConsecutive429 = 0
                 perModelStore.save(full, at: now)
                 perModelNextFetch = now.addingTimeInterval(perModelRefreshInterval)
                 Log.poll.notice(
                     "supplement 200 · models=[\(full.perModelWindows.map(\.name).joined(separator: ","), privacy: .public)]")
             } catch let error as UsageError {
-                // Honor the endpoint's own Retry-After on a 429 so Fable returns the moment the
-                // penalty lifts — not a blind 15 min later, and not by hammering it meanwhile.
                 let wait: TimeInterval
                 if case .rateLimited(let retryAfter) = error {
-                    wait = (retryAfter.map { min($0, PollPolicy.retryAfterCeiling) } ?? perModelRefreshInterval)
+                    perModelConsecutive429 += 1
+                    // This endpoint RE-TRIGGERS its penalty on any contact — a clean retry after
+                    // the stated window still came back with a fresh 3600s (observed 2026-07-16).
+                    // So honoring Retry-After alone just keeps it hot forever. Escalate hard on
+                    // repeats (15m→30m→1h→2h→4h, cap 6h) to give it real quiet time, with the
+                    // server's Retry-After as a floor.
+                    let escalated = min(
+                        perModelRefreshInterval * pow(2, Double(min(perModelConsecutive429 - 1, 5))),
+                        6 * 3600)
+                    let serverFloor = (retryAfter.map { min($0, PollPolicy.retryAfterCeiling) } ?? 0)
                         + PollPolicy.retryAfterMargin
+                    wait = max(escalated, serverFloor)
+                    Log.poll.notice(
+                        "supplement 429 (×\(self.perModelConsecutive429, privacy: .public), retry-after=\(retryAfter.map { String(Int($0)) } ?? "none", privacy: .public)s) · backing off \(Int(wait), privacy: .public)s · keeping \(self.lastPerModelSnapshot == nil ? "no" : "cached", privacy: .public) data")
                 } else {
                     wait = policy.idleInterval
+                    Log.poll.notice(
+                        "supplement \(String(describing: error), privacy: .public) · next in \(Int(wait), privacy: .public)s")
                 }
                 perModelNextFetch = now.addingTimeInterval(wait)
-                Log.poll.notice(
-                    "supplement \(String(describing: error), privacy: .public) · next in \(Int(wait), privacy: .public)s · keeping \(self.lastPerModelSnapshot == nil ? "no" : "cached", privacy: .public) data")
             } catch {
                 perModelNextFetch = now.addingTimeInterval(policy.idleInterval)
                 Log.poll.notice("supplement failed: \(String(describing: error), privacy: .public)")
