@@ -9,12 +9,9 @@
 # 429 + its Retry-After, supplement (per-model) outcomes, and popover-open refreshes.
 # Nothing sensitive is logged — utilization numbers and HTTP statuses only, never the token.
 
-PRED='eventMessage CONTAINS "probe " \
-  OR eventMessage CONTAINS "next poll" \
-  OR eventMessage CONTAINS "supplement" \
-  OR eventMessage CONTAINS "RATE LIMITED" \
-  OR eventMessage CONTAINS "popover open" \
-  OR eventMessage CONTAINS "manual refresh"'
+# Single-line predicate on purpose: a backslash-continued predicate inside quotes is passed
+# literally to `log` and silently matches nothing.
+PRED='eventMessage CONTAINS "probe " OR eventMessage CONTAINS "next poll" OR eventMessage CONTAINS "supplement" OR eventMessage CONTAINS "RATE LIMITED" OR eventMessage CONTAINS "popover open" OR eventMessage CONTAINS "manual refresh"'
 
 if [ "$1" = "--last" ]; then
   log show --last "${2:-1h}" --info --debug --predicate "$PRED"
