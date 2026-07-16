@@ -52,6 +52,7 @@ public enum IconResolver {
         composition: [BarItem],
         thirdModelBar: Bool,
         snapshot: UsageSnapshot?,
+        seenModels: [String] = [],
         now: Date = Date()
     ) -> IconDescriptor {
         switch style {
@@ -60,8 +61,15 @@ public enum IconResolver {
                 IconDescriptor.Bar(name: "5-hour", value: snapshot?.fiveHour?.utilization),
                 IconDescriptor.Bar(name: "weekly", value: snapshot?.sevenDay?.utilization),
             ]
-            if thirdModelBar, let third = mostConstrainedModel(in: snapshot) {
-                bars.append(third)
+            if thirdModelBar {
+                if let third = mostConstrainedModel(in: snapshot) {
+                    bars.append(third)
+                } else if let pending = seenModels.sorted().first {
+                    // Seen before but no per-model data right now (the usage-endpoint
+                    // supplement is unavailable, usually rate limited): keep the third bar as
+                    // an empty rail so the menu bar shows it's pending, not that it vanished.
+                    bars.append(IconDescriptor.Bar(name: "\(pending) weekly", value: nil))
+                }
             }
             return IconDescriptor(
                 content: .stacked(bars),

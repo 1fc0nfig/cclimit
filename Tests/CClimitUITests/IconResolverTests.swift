@@ -27,11 +27,12 @@ final class IconResolverTests: XCTestCase {
         source: IconSource = .auto,
         composition: [BarItem] = BarComposition.makeDefault(),
         third: Bool = false,
-        snapshot: UsageSnapshot?
+        snapshot: UsageSnapshot?,
+        seenModels: [String] = []
     ) -> IconDescriptor {
         IconResolver.resolve(
             style: style, source: source, composition: composition,
-            thirdModelBar: third, snapshot: snapshot,
+            thirdModelBar: third, snapshot: snapshot, seenModels: seenModels,
             now: Date(timeIntervalSinceReferenceDate: 400_000))
     }
 
@@ -52,6 +53,24 @@ final class IconResolverTests: XCTestCase {
         XCTAssertEqual(bars[2].name, "Fable weekly")
         XCTAssertEqual(bars[2].value, 73)
         XCTAssertEqual(d.summary, "5-hour + weekly + Fable weekly")
+    }
+
+    func testStackedThirdBarShowsBlankForSeenButMissingModel() {
+        // Supplement unavailable (no per-model in snapshot) but Fable was seen before →
+        // keep a third bar with a nil value so the menu bar shows it's pending, not gone.
+        let d = resolve(style: .dualBars, third: true, snapshot: snapshot(fable: nil),
+                        seenModels: ["Fable"])
+        guard case .stacked(let bars) = d.content else { return XCTFail("expected stacked") }
+        XCTAssertEqual(bars.count, 3)
+        XCTAssertEqual(bars[2].name, "Fable weekly")
+        XCTAssertNil(bars[2].value)
+    }
+
+    func testStackedThirdBarStaysTwoWhenNoModelEverSeen() {
+        // No per-model data and nothing seen before → no invented third bar.
+        let d = resolve(style: .dualBars, third: true, snapshot: snapshot(fable: nil))
+        guard case .stacked(let bars) = d.content else { return XCTFail("expected stacked") }
+        XCTAssertEqual(bars.count, 2)
     }
 
     func testStackedThirdBarRequiresTheToggle() {

@@ -94,7 +94,8 @@ private struct MenuBarLabel: View {
                 source: source,
                 composition: BarComposition.parse(barCompositionRaw),
                 thirdModelBar: dualBarsThirdModel,
-                snapshot: state.snapshot),
+                snapshot: state.snapshot,
+                seenModels: state.seenModelNames),
             template: template,
             degraded: degraded)
     }

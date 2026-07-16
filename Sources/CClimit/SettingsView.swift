@@ -106,7 +106,8 @@ private struct AppearanceSettings: View {
             source: source,
             composition: BarComposition.parse(barCompositionRaw),
             thirdModelBar: dualBarsThirdModel,
-            snapshot: state.snapshot)
+            snapshot: state.snapshot,
+            seenModels: state.seenModelNames)
     }
 
     /// The exact resolution the menu bar renders for the selected style — the caption reads
