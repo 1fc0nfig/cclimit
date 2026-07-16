@@ -18,6 +18,13 @@ public struct OAuthCredentials: Equatable, Sendable {
 
     /// The usage endpoint needs user:profile; setup-tokens (inference only) get 403.
     public var hasProfileScope: Bool { scopes.contains("user:profile") }
+
+    /// True once the token is past (or within two minutes of) its expiry — time to re-read
+    /// the store. Tokens without an expiry are trusted until the API says 401.
+    public func isExpired(at now: Date = Date()) -> Bool {
+        guard let expiresAt else { return false }
+        return now.addingTimeInterval(120) >= expiresAt
+    }
 }
 
 public enum CredentialError: Error, Equatable {

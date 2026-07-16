@@ -5,7 +5,7 @@ public enum UsageError: Error, Equatable {
     case credentialAccessDenied
     case unauthorized          // 401 — token stale; re-read the store first
     case forbidden             // 403 — likely inference-only token (no user:profile scope)
-    case rateLimited           // 429 — back off hard, endpoint sends no Retry-After
+    case rateLimited(retryAfter: TimeInterval?) // 429 — honor Retry-After (observed ~1300s penalties)
     case offline
     case schemaChanged(String) // decode failure or unexpected status — endpoint drifted
 }
@@ -16,20 +16,32 @@ public enum UsageError: Error, Equatable {
 public struct UsageClient: Sendable {
     public static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
+    /// Tracks the current Claude Code release; a stale version risks a stricter bucket.
+    /// Bump alongside releases (was pinned at 2.1.0 while real installs were on 2.1.173).
+    public static let defaultUserAgentVersion = "2.1.173"
+
+    /// Claude Code's real UA, verified against the 2.1.173 binary:
+    /// `claude-cli/${VERSION} (external, cli)` — NOT `claude-code/…`. The endpoint keys its
+    /// rate-limit bucket on the client fingerprint (Claude Code's /usage kept working while
+    /// our old UA sat in an escalating 429 penalty), so this string must match exactly.
+    public static func userAgent(version: String) -> String {
+        "claude-cli/\(version) (external, cli)"
+    }
+
     let session: URLSession
     let userAgentVersion: String
 
-    public init(session: URLSession = .shared, userAgentVersion: String = "2.1.0") {
+    public init(session: URLSession = .shared, userAgentVersion: String = defaultUserAgentVersion) {
         self.session = session
         self.userAgentVersion = userAgentVersion
     }
 
-    public static func request(token: String, userAgentVersion: String = "2.1.0") -> URLRequest {
+    public static func request(token: String, userAgentVersion: String = defaultUserAgentVersion) -> URLRequest {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("claude-code/\(userAgentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue(userAgent(version: userAgentVersion), forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 15
         return request
@@ -56,8 +68,17 @@ public struct UsageClient: Sendable {
             }
         case 401: throw UsageError.unauthorized
         case 403: throw UsageError.forbidden
-        case 429: throw UsageError.rateLimited
+        case 429: throw UsageError.rateLimited(retryAfter: Self.retryAfter(from: http))
         default: throw UsageError.schemaChanged("HTTP \(http.statusCode)")
         }
+    }
+
+    /// Retry-After in delta-seconds form (the only form this endpoint has been seen to send).
+    static func retryAfter(from http: HTTPURLResponse) -> TimeInterval? {
+        guard let raw = http.value(forHTTPHeaderField: "Retry-After"),
+              let seconds = TimeInterval(raw.trimmingCharacters(in: .whitespaces)),
+              seconds > 0
+        else { return nil }
+        return seconds
     }
 }

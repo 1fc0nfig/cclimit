@@ -70,7 +70,10 @@ final class ModelsTests: XCTestCase {
         let request = UsageClient.request(token: "sk-test", userAgentVersion: "2.1.0")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test")
         XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "claude-code/2.1.0")
+        // Must match Claude Code's real UA exactly (verified against the 2.1.173 binary);
+        // the endpoint buckets rate limits by client fingerprint.
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "User-Agent"), "claude-cli/2.1.0 (external, cli)")
     }
 
     func testCredentialJSONParsing() throws {

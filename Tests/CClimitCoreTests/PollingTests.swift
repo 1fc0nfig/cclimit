@@ -23,13 +23,38 @@ final class PollingTests: XCTestCase {
     func testRateLimitBackoffDoublesAndCaps() {
         var state = PollState()
         var intervals: [TimeInterval] = []
-        for _ in 0..<5 {
+        for _ in 0..<7 {
             state.recordRateLimit()
             if case .poll(let after) = nextPoll(policy: policy, state: state) {
                 intervals.append(after)
             }
         }
-        XCTAssertEqual(intervals, [60, 120, 240, 300, 300])
+        XCTAssertEqual(intervals, [60, 120, 240, 480, 960, 1800, 1800])
+    }
+
+    func testServerRetryAfterBeatsExponentialSchedule() {
+        // Live behavior 2026-07-16: 429 with Retry-After: 1300. Waiting less than the
+        // penalty re-trips it, so the server value (plus margin) must win outright.
+        var state = PollState()
+        state.recordRateLimit(retryAfter: 1300)
+        XCTAssertEqual(
+            nextPoll(policy: policy, state: state),
+            .poll(after: 1300 + PollPolicy.retryAfterMargin))
+    }
+
+    func testAbsurdRetryAfterIsCeilinged() {
+        var state = PollState()
+        state.recordRateLimit(retryAfter: 999_999)
+        XCTAssertEqual(
+            nextPoll(policy: policy, state: state),
+            .poll(after: PollPolicy.retryAfterCeiling + PollPolicy.retryAfterMargin))
+    }
+
+    func testSuccessClearsServerRetryAfter() {
+        var state = PollState()
+        state.recordRateLimit(retryAfter: 1300)
+        state.recordSuccess()
+        XCTAssertNil(state.serverRetryAfter)
     }
 
     func testSuccessResetsBackoff() {

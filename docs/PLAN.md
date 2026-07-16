@@ -32,6 +32,30 @@ at v0.2**, **attribution stays v1.0 with prerequisites front-loaded**. Peak-hour
 > local "CClimit Dev" cert — **not yet notarized**, so other Macs need right-click → Open.
 > Two follow-ups gate a promoted launch: (1) Developer ID + notarization, (2) host
 > `appcast.xml` on cclimit.app (cclimit-web has no git remote yet) so auto-update goes live.
+>
+> **Update 2026-07-16 (later) — rate-limit recovery + keychain friction fix.** Live 429s
+> revealed the endpoint now DOES send `Retry-After` (observed 1300s ≈ 22 min penalties);
+> the old 300s backoff cap retried inside the penalty and never recovered. Fixes:
+> `UsageError.rateLimited(retryAfter:)` honors the header (+30s margin, 2h ceiling), blind
+> backoff cap raised to 1800s, stale `asyncAfter` timers no longer wake later sleeps early
+> (generation counter in AppState — manual refreshes used to permanently accelerate polling),
+> UA auto-detected from the installed Claude Code (`ClaudeCodeVersion.detect()`: native
+> installer symlink/versions dir + nvm/npm package.json, highest semver; pinned fallback
+> bumped 2.1.0 → 2.1.173). Keychain prompt friction (issue #4): credentials now cached in
+> memory, re-read only on expiry (2 min skew) or 401 — previously every poll re-read the
+> Keychain, and every Claude Code token refresh resets the item's ACL, so prompts recurred
+> constantly. Full ACL persistence still needs the stable Developer ID signature (issue #3).
+>
+> **Endpoint rate-limit reality (established live, 2026-07-16):** the 429 penalty ESCALATES
+> (1300s → 3600s) and waiting out one Retry-After did not clear it — probing during/near the
+> penalty extends it. Claude Code's real UA is `claude-cli/${VERSION} (external, cli)`
+> (extracted from the 2.1.173 binary), not `claude-code/…`; cclimit now sends the exact
+> string, but the corrected UA alone did not lift an active penalty, so the bucket looks
+> account-keyed, sized for Claude Code's own modest pattern. Claude Code never *shows* the
+> problem because it learns utilization from response headers on normal message traffic and
+> its `fetchUtilization` falls back to cache on 429 — its /usage screen can render cached
+> data straight through a penalty. Consequence for cclimit: polls are a shared, scarce
+> resource; cadence must stay conservative and Retry-After must always be honored.
 
 ## Phase 0 — Verify before code (~1 hour, Matyas-gated)
 

@@ -12,7 +12,7 @@ enum Health: Equatable {
     case credentialAccessDenied
     case unauthorized
     case forbidden
-    case rateLimited
+    case rateLimited(retryAfter: TimeInterval?)
     case offline
     case schemaChanged
 
@@ -30,7 +30,11 @@ enum Health: Equatable {
             return "Token expired. Use `claude` once to refresh it — cclimit picks it up automatically."
         case .forbidden:
             return "This token can't read usage (missing user:profile scope). Log in with `claude`, not `claude setup-token`."
-        case .rateLimited:
+        case .rateLimited(let retryAfter):
+            if let retryAfter {
+                let minutes = max(1, Int((retryAfter / 60).rounded(.up)))
+                return "Rate limited by the usage API — retrying in ~\(minutes) min."
+            }
             return "Rate limited by the usage API — backing off."
         case .offline:
             return "Network unreachable."
@@ -63,8 +67,15 @@ final class AppState: ObservableObject {
     private var lastFiveHourUtil: Double?
 
     let sampleStore = SampleStore()
-    private let client = UsageClient()
+    /// UA tracks the Claude Code actually installed here; the pinned default is only a
+    /// fallback (a stale UA risks the aggressively rate-limited bucket, claude-code #30930).
+    private let client = UsageClient(
+        userAgentVersion: ClaudeCodeVersion.detect() ?? UsageClient.defaultUserAgentVersion)
     private let credentials = ChainedCredentialSource()
+    /// In-memory only (product.md §5). Caching also matters for UX: reading the Keychain
+    /// item every poll re-triggers the consent prompt whenever Claude Code has rewritten
+    /// the item (each token refresh resets its ACL). Re-read only on expiry or 401.
+    private var cachedCredentials: OAuthCredentials?
     private let notifier = Notifier()
 
     private var pollState = PollState()
@@ -108,22 +119,31 @@ final class AppState: ObservableObject {
 
     func pollOnce() async {
         let creds: OAuthCredentials
-        do {
-            creds = try credentials.load()
-        } catch CredentialError.accessDenied {
-            health = .credentialAccessDenied
-            pollState.recordFailure()
-            return
-        } catch {
-            health = .noCredentials
-            pollState.recordFailure()
-            return
+        if let cached = cachedCredentials, !cached.isExpired() {
+            creds = cached
+        } else {
+            do {
+                creds = try credentials.load()
+                cachedCredentials = creds
+            } catch CredentialError.accessDenied {
+                health = .credentialAccessDenied
+                pollState.recordFailure()
+                return
+            } catch {
+                health = .noCredentials
+                pollState.recordFailure()
+                return
+            }
         }
 
         do {
             let snap = try await client.fetch(token: creds.accessToken)
             apply(snapshot: snap, at: Date())
         } catch let error as UsageError {
+            if case .unauthorized = error {
+                // Token the store gave us is stale — drop it so the next cycle re-reads.
+                cachedCredentials = nil
+            }
             apply(error: error)
         } catch {
             health = .offline
@@ -163,9 +183,9 @@ final class AppState: ObservableObject {
 
     private func apply(error: UsageError) {
         switch error {
-        case .rateLimited:
-            health = .rateLimited
-            pollState.recordRateLimit()
+        case .rateLimited(let retryAfter):
+            health = .rateLimited(retryAfter: retryAfter)
+            pollState.recordRateLimit(retryAfter: retryAfter)
         case .unauthorized:
             // Claude Code refreshes the token on use; our next cycle re-reads the store.
             health = .unauthorized
@@ -241,16 +261,25 @@ final class AppState: ObservableObject {
 
     // MARK: - Sleep / wake plumbing
 
+    /// Invalidates timers from earlier sleeps. Without this, a sleep cut short by a manual
+    /// refresh or unlock leaves its timer pending, and that stale timer later wakes the NEXT
+    /// sleep early — polls creep faster than policy, which can hammer through a 429 penalty.
+    private var sleepGeneration = 0
+
     private func sleepInterruptibly(_ interval: TimeInterval) async {
+        sleepGeneration += 1
+        let generation = sleepGeneration
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             wakeSignal = cont
             DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
-                self?.wake()
+                guard let self, self.sleepGeneration == generation else { return }
+                self.wake()
             }
         }
     }
 
     private func waitForWake() async {
+        sleepGeneration += 1  // orphan any timer from the sleep this pause replaced
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             wakeSignal = cont
         }
