@@ -67,10 +67,20 @@ final class AppState: ObservableObject {
     private var lastFiveHourUtil: Double?
 
     let sampleStore = SampleStore()
-    /// UA tracks the Claude Code actually installed here; the pinned default is only a
-    /// fallback (a stale UA risks the aggressively rate-limited bucket, claude-code #30930).
-    private let client = UsageClient(
-        userAgentVersion: ClaudeCodeVersion.detect() ?? UsageClient.defaultUserAgentVersion)
+    /// UA tracks the Claude Code actually installed here; the pinned default is only a fallback.
+    private static let ua = ClaudeCodeVersion.detect() ?? UsageClient.defaultUserAgentVersion
+    /// PRIMARY source: 5h + weekly utilization from the unified rate-limit headers on a
+    /// /v1/messages probe — the mechanism Claude Code uses. Rides the generous message limit
+    /// instead of /api/oauth/usage's tiny per-account bucket, so it polls without penalties.
+    private let probe = RateLimitProbe(userAgentVersion: AppState.ua)
+    /// SUPPLEMENT: the usage endpoint, called rarely, only for the per-model (e.g. Fable)
+    /// weekly breakdown the headers don't carry. Non-fatal — a 429 here just leaves per-model
+    /// data stale; the header-driven 5h/weekly gauge keeps working.
+    private let client = UsageClient(userAgentVersion: AppState.ua)
+    /// Minimum spacing between usage-endpoint supplement calls (respects its scarce budget).
+    private let perModelRefreshInterval: TimeInterval = 15 * 60
+    private var lastPerModelSnapshot: UsageSnapshot?
+    private var lastPerModelFetch: Date?
     private let credentials = ChainedCredentialSource()
     /// In-memory only (product.md §5). Caching also matters for UX: reading the Keychain
     /// item every poll re-triggers the consent prompt whenever Claude Code has rewritten
@@ -136,9 +146,12 @@ final class AppState: ObservableObject {
             }
         }
 
+        let now = Date()
         do {
-            let snap = try await client.fetch(token: creds.accessToken)
-            apply(snapshot: snap, at: Date())
+            // Primary: header-driven 5h + weekly. This is the poll that must not be starved.
+            let probeSnap = try await probe.fetch(token: creds.accessToken)
+            let merged = await mergeWithPerModel(probeSnap, token: creds.accessToken, now: now)
+            apply(snapshot: merged, at: now)
         } catch let error as UsageError {
             if case .unauthorized = error {
                 // Token the store gave us is stale — drop it so the next cycle re-reads.
@@ -149,6 +162,32 @@ final class AppState: ObservableObject {
             health = .offline
             pollState.recordFailure()
         }
+    }
+
+    /// Fold the per-model weekly windows from the usage endpoint into the header snapshot.
+    /// The supplement is fetched at most every `perModelRefreshInterval`; between fetches the
+    /// last successful per-model data is reused. A failure here is swallowed on purpose — the
+    /// header-driven 5h/weekly gauge is what the user relies on, and the usage endpoint's
+    /// budget is too scarce to let its 429s degrade the primary reading.
+    private func mergeWithPerModel(
+        _ probeSnap: UsageSnapshot, token: String, now: Date
+    ) async -> UsageSnapshot {
+        let due = lastPerModelFetch.map { now.timeIntervalSince($0) >= perModelRefreshInterval } ?? true
+        if due {
+            lastPerModelFetch = now
+            if let full = try? await client.fetch(token: token) {
+                lastPerModelSnapshot = full
+            }
+        }
+        guard let supplement = lastPerModelSnapshot else { return probeSnap }
+        // Header values win for 5h/weekly (always fresh); borrow only per-model + extra usage.
+        return UsageSnapshot(
+            fiveHour: probeSnap.fiveHour ?? supplement.fiveHour,
+            sevenDay: probeSnap.sevenDay ?? supplement.sevenDay,
+            sevenDayOpus: supplement.sevenDayOpus,
+            sevenDaySonnet: supplement.sevenDaySonnet,
+            limits: supplement.limits,
+            extraUsage: supplement.extraUsage)
     }
 
     private func apply(snapshot snap: UsageSnapshot, at now: Date) {

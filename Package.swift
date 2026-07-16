@@ -18,6 +18,7 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ]),
         .executableTarget(name: "cclimit-dump", dependencies: ["CClimitCore"]),
+        .executableTarget(name: "cclimit-probe", dependencies: ["CClimitCore"]),
         .testTarget(name: "CClimitCoreTests", dependencies: ["CClimitCore"]),
         .testTarget(name: "CClimitUITests", dependencies: ["CClimitCore", "CClimitUI"]),
     ]
