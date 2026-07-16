@@ -65,12 +65,19 @@ struct PopoverView: View {
         case SectionLayout.attribution:
             if !state.burns.isEmpty { AttributionSection(burns: state.burns) }
         default:
-            if let name = SectionLayout.modelName(id),
-               let model = snap.perModelWindows.first(where: { $0.name == name }) {
-                WindowRow(
-                    title: "Weekly · \(model.name)",
-                    window: model.window,
-                    badge: model.isActive ? "active" : nil)
+            if let name = SectionLayout.modelName(id) {
+                if let model = snap.perModelWindows.first(where: { $0.name == name }) {
+                    WindowRow(
+                        title: "Weekly · \(model.name)",
+                        window: model.window,
+                        badge: model.isActive ? "active" : nil)
+                } else {
+                    // Seen in a prior run but absent from the current snapshot: the per-model
+                    // supplement (usage endpoint) hasn't answered yet — often because it's
+                    // rate-limited. Render a blank bar so it's clear the row is pending, not
+                    // that the limit is empty.
+                    WindowRow(title: "Weekly · \(name)", window: nil, badge: "unavailable")
+                }
             }
         }
     }
