@@ -96,6 +96,49 @@ public struct KeychainCredentialSource: CredentialSource {
     }
 }
 
+/// Reads the same Keychain item by shelling out to /usr/bin/security.
+/// Claude Code writes the item through the `security` CLI, so that binary is the item's trusted
+/// application — reading through it needs no consent. Reading via SecItemCopyMatching instead
+/// re-prompts after every token refresh, because Claude Code's rewrite resets the item's ACL
+/// and drops cclimit's "Always Allow". Still strictly read-only (`find-generic-password`).
+public struct SecurityCLICredentialSource: CredentialSource {
+    public let service: String
+    let executable: URL
+
+    public init(
+        service: String = "Claude Code-credentials",
+        executable: URL = URL(fileURLWithPath: "/usr/bin/security")
+    ) {
+        self.service = service
+        self.executable = executable
+    }
+
+    public func load() throws -> OAuthCredentials {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            throw CredentialError.malformed("cannot run security: \(error)")
+        }
+        // Drain before waiting so a large payload can't fill the pipe and deadlock.
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        switch process.terminationStatus {
+        case 0:
+            return try CredentialJSON.parse(data)
+        case 44:  // errSecItemNotFound
+            throw CredentialError.notFound
+        default:
+            throw CredentialError.malformed("security exited \(process.terminationStatus)")
+        }
+    }
+}
+
 /// Fallback used on Linux/headless setups: ~/.claude/.credentials.json (same JSON shape).
 public struct FileCredentialSource: CredentialSource {
     public let url: URL
@@ -114,12 +157,15 @@ public struct FileCredentialSource: CredentialSource {
     }
 }
 
-/// Keychain first, file fallback. Access denial is surfaced (it needs its own UI state),
-/// everything else falls through to the next source.
+/// Keychain via the `security` CLI first (no consent prompt), then the Keychain API directly,
+/// then the file. Access denial is surfaced (it needs its own UI state), everything else falls
+/// through to the next source.
 public struct ChainedCredentialSource: CredentialSource {
     let sources: [CredentialSource]
 
-    public init(sources: [CredentialSource] = [KeychainCredentialSource(), FileCredentialSource()]) {
+    public init(sources: [CredentialSource] = [
+        SecurityCLICredentialSource(), KeychainCredentialSource(), FileCredentialSource(),
+    ]) {
         self.sources = sources
     }
 
