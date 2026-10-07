@@ -46,6 +46,16 @@ at v0.2**, **attribution stays v1.0 with prerequisites front-loaded**. Peak-hour
 > Keychain, and every Claude Code token refresh resets the item's ACL, so prompts recurred
 > constantly. Full ACL persistence still needs the stable Developer ID signature (issue #3).
 >
+> **Update 2026-10-07 — Keychain prompt removed for good.** The prompt still came back every
+> ~15 min. Root cause, read from the item's ACL (`security dump-keychain -a`): every
+> `CClimit.app` entry failed validation (status -2147415734), so "Always Allow" never stuck,
+> and Claude Code rewrites the item on each token refresh. The only entry that always
+> validates is `/usr/bin/security`, the tool Claude Code uses to write the item. Fix:
+> `SecurityToolCredentialSource` runs `security find-generic-password -s … -w` and is now
+> first in the default chain. The direct `SecItemCopyMatching` source stays in the code but
+> is out of the chain. No prompt, independent of signing identity (issue #3 no longer gates
+> this).
+>
 > **Endpoint rate-limit reality (established live, 2026-07-16):** the 429 penalty ESCALATES
 > (1300s → 3600s) and waiting out one Retry-After did not clear it — probing during/near the
 > penalty extends it. Claude Code's real UA is `claude-cli/${VERSION} (external, cli)`

@@ -62,8 +62,9 @@ enum CredentialJSON {
     }
 }
 
-/// Reads the generic password Claude Code stores under service "Claude Code-credentials".
-/// First read triggers a one-time macOS consent dialog — expected, explained in onboarding.
+/// Reads the generic password Claude Code stores under service "Claude Code-credentials"
+/// through the Security framework. This prompts for consent, and the consent does not survive
+/// an unvalidated signature or a Claude Code token refresh. Prefer `SecurityToolCredentialSource`.
 public struct KeychainCredentialSource: CredentialSource {
     public let service: String
 
@@ -96,6 +97,67 @@ public struct KeychainCredentialSource: CredentialSource {
     }
 }
 
+/// Reads the same Keychain item by running `/usr/bin/security`, the way Claude Code itself does.
+/// Claude Code creates and rewrites the item with that tool, so the item's ACL always trusts it:
+/// the read never shows a consent dialog. A direct `SecItemCopyMatching` from CClimit needs its
+/// own ACL entry, which only holds while macOS can validate CClimit's signature, and every
+/// Claude Code token refresh can reset it. That is the recurring "allow access" prompt.
+public struct SecurityToolCredentialSource: CredentialSource {
+    public let service: String
+    let toolPath: String
+
+    public init(service: String = "Claude Code-credentials", toolPath: String = "/usr/bin/security") {
+        self.service = service
+        self.toolPath = toolPath
+    }
+
+    public func load() throws -> OAuthCredentials {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: toolPath)
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            throw CredentialError.notFound
+        }
+        // Read before waiting: a full pipe buffer would otherwise block the child forever.
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        switch process.terminationStatus {
+        case 0:
+            return try CredentialJSON.parse(Self.decode(data))
+        case 44:  // errSecItemNotFound
+            throw CredentialError.notFound
+        case 51, 128:  // errSecAuthFailed / errSecUserCanceled (low byte of -128)
+            throw CredentialError.accessDenied
+        default:
+            throw CredentialError.malformed("security exited \(process.terminationStatus)")
+        }
+    }
+
+    /// `security -w` prints the secret plus a newline, or hex when the bytes aren't printable.
+    static func decode(_ output: Data) -> Data {
+        let text = String(decoding: output, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.hasPrefix("{"), text.count % 2 == 0,
+              text.allSatisfy(\.isHexDigit)
+        else { return Data(text.utf8) }
+        var bytes = Data(capacity: text.count / 2)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            guard let byte = UInt8(text[index..<next], radix: 16) else { return Data(text.utf8) }
+            bytes.append(byte)
+            index = next
+        }
+        return bytes
+    }
+}
+
 /// Fallback used on Linux/headless setups: ~/.claude/.credentials.json (same JSON shape).
 public struct FileCredentialSource: CredentialSource {
     public let url: URL
@@ -114,12 +176,14 @@ public struct FileCredentialSource: CredentialSource {
     }
 }
 
-/// Keychain first, file fallback. Access denial is surfaced (it needs its own UI state),
-/// everything else falls through to the next source.
+/// Keychain (via `/usr/bin/security`, prompt-free) first, file fallback. The direct
+/// `KeychainCredentialSource` is deliberately not in the default chain: it is the path that
+/// prompts. Access denial is surfaced (it needs its own UI state), everything else falls
+/// through to the next source.
 public struct ChainedCredentialSource: CredentialSource {
     let sources: [CredentialSource]
 
-    public init(sources: [CredentialSource] = [KeychainCredentialSource(), FileCredentialSource()]) {
+    public init(sources: [CredentialSource] = [SecurityToolCredentialSource(), FileCredentialSource()]) {
         self.sources = sources
     }
 
