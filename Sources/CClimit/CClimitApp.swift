@@ -85,6 +85,13 @@ private struct MenuBarLabel: View {
     @AppStorage("barComposition") private var barCompositionRaw = ""
     @AppStorage("dualBarsThirdModel") private var dualBarsThirdModel = false
 
+    /// The percent+time style prints a countdown, which would otherwise only be redrawn when a
+    /// poll changes the snapshot — up to 5 minutes of drift. A minute timer advances `now`.
+    /// Not a TimelineView: inside a MenuBarExtra label it re-rendered in a tight loop
+    /// (100% CPU, the main thread never got to start polling).
+    @State private var now = Date()
+    private let minuteTick = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+
     private var degraded: Bool { state.health.isError && state.snapshot == nil }
 
     var body: some View {
@@ -95,8 +102,10 @@ private struct MenuBarLabel: View {
                 composition: BarComposition.parse(barCompositionRaw),
                 thirdModelBar: dualBarsThirdModel,
                 snapshot: state.snapshot,
-                seenModels: state.seenModelNames),
+                seenModels: state.seenModelNames,
+                now: now),
             template: template,
             degraded: degraded)
+        .onReceive(minuteTick) { now = $0 }
     }
 }

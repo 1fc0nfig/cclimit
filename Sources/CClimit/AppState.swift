@@ -92,9 +92,9 @@ final class AppState: ObservableObject {
     /// contact re-triggers its penalty and retrying at a fixed cadence never lets it recover.
     private var perModelConsecutive429 = 0
     private let credentials = ChainedCredentialSource()
-    /// In-memory only (product.md §5). Caching also matters for UX: reading the Keychain
-    /// item every poll re-triggers the consent prompt whenever Claude Code has rewritten
-    /// the item (each token refresh resets its ACL). Re-read only on expiry or 401.
+    /// In-memory only (product.md §5). Reads go through `/usr/bin/security`, which the item's
+    /// ACL always trusts, so they never prompt. Caching still saves a subprocess per poll:
+    /// re-read only on expiry or 401.
     private var cachedCredentials: OAuthCredentials?
     private let notifier = Notifier()
 
@@ -118,10 +118,10 @@ final class AppState: ObservableObject {
 
     /// A note when per-model data is older than a refresh cycle (the usage endpoint has been
     /// unavailable), so the rows read as "last known", not current. Nil while fresh.
-    var perModelStaleNote: String? {
+    func perModelStaleNote(now: Date = Date()) -> String? {
         guard let updated = perModelUpdated else { return nil }
-        guard Date().timeIntervalSince(updated) > perModelRefreshInterval + 120 else { return nil }
-        return "updated \(Format.staleness(since: updated))"
+        guard now.timeIntervalSince(updated) > perModelRefreshInterval + 120 else { return nil }
+        return "updated \(Format.staleness(since: updated, now: now))"
     }
 
     var policy: PollPolicy {

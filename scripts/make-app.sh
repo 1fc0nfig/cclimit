@@ -58,13 +58,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Prefer the stable "CClimit Dev" identity (scripts/dev-cert.sh) so the Keychain consent
-# for reading Claude Code's token survives rebuilds. Fall back to ad-hoc if it's absent.
-# Note: the dev cert is self-signed/untrusted by design, so it's listed by `find-identity`
-# WITHOUT -v (which filters to trusted identities only).
-DEV_IDENTITY="CClimit Dev"
-if security find-identity -p codesigning 2>/dev/null | grep -q "$DEV_IDENTITY"; then
-    SIGN_IDENTITY="$DEV_IDENTITY"
+# Keychain consent for reading Claude Code's token only persists if macOS can validate the
+# app's signature chain. Prefer a *valid* (Apple-trusted) identity: an untrusted self-signed
+# cert signs fine but fails ACL validation, so "Always Allow" never sticks and every token
+# read re-prompts. Order: Apple Development > CClimit Dev (works only if the user marked it
+# trusted in Keychain Access) > ad-hoc (re-prompts every rebuild).
+if APPLE_DEV="$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"')" && [ -n "$APPLE_DEV" ]; then
+    SIGN_IDENTITY="$APPLE_DEV"
+elif security find-identity -v -p codesigning 2>/dev/null | grep -q "CClimit Dev"; then
+    SIGN_IDENTITY="CClimit Dev"
 else
     SIGN_IDENTITY="-"
 fi

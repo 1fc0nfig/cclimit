@@ -20,7 +20,26 @@ struct PopoverView: View {
             .filter { !hiddenSections.contains($0) }
     }
 
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
+
     var body: some View {
+        // Every "resets in …" / "updated … ago" string is relative to the wall clock, but
+        // SwiftUI only re-runs a row's body when that row's data changes — an untouched
+        // window would keep the countdown it was first drawn with, so the popover showed
+        // three rows each frozen at a different minute. One `now`, advanced every 15 s, is
+        // handed down the whole tree so the clock text stays true. (A timer, not a
+        // TimelineView: that looped at 100% CPU in the menu bar label.)
+        content(now: now)
+        .onReceive(tick) { now = $0 }
+        .onAppear {
+            now = Date()
+            state.refreshOnOpen()
+            state.refreshAttributionIfStale()
+        }
+    }
+
+    private func content(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             if let message = state.health.message {
                 HealthBanner(message: message)
@@ -29,7 +48,7 @@ struct PopoverView: View {
             if let snap = state.snapshot {
                 ForEach(Array(visibleSections(snap).enumerated()), id: \.element) { index, id in
                     if index > 0 && isDivided(id) { Divider() }
-                    sectionView(id, snap: snap)
+                    sectionView(id, snap: snap, now: now)
                 }
             } else if !state.health.isError {
                 HStack(spacing: 8) {
@@ -41,14 +60,10 @@ struct PopoverView: View {
             }
 
             Divider()
-            footer
+            footer(now: now)
         }
         .padding(14)
         .frame(width: 300)
-        .onAppear {
-            state.refreshOnOpen()
-            state.refreshAttributionIfStale()
-        }
     }
 
     /// Forecast and attribution get a divider above them; window rows flow together.
@@ -57,14 +72,17 @@ struct PopoverView: View {
     }
 
     @ViewBuilder
-    private func sectionView(_ id: String, snap: UsageSnapshot) -> some View {
+    private func sectionView(_ id: String, snap: UsageSnapshot, now: Date) -> some View {
         switch id {
         case SectionLayout.fiveHour:
-            WindowRow(title: "5-hour window", window: snap.fiveHour)
+            WindowRow(title: "5-hour window", window: snap.fiveHour, now: now)
         case SectionLayout.weekly:
-            WindowRow(title: "Weekly cap", window: snap.sevenDay)
+            WindowRow(title: "Weekly cap", window: snap.sevenDay, now: now)
         case SectionLayout.forecast:
-            ForecastSection(fiveHour: state.fiveHourVerdict, weeklyForecasts: state.weeklyForecasts)
+            ForecastSection(
+                fiveHour: state.fiveHourVerdict,
+                weeklyForecasts: state.weeklyForecasts,
+                now: now)
         case SectionLayout.attribution:
             if !state.burns.isEmpty { AttributionSection(burns: state.burns) }
         default:
@@ -73,26 +91,27 @@ struct PopoverView: View {
                     WindowRow(
                         title: "Weekly · \(model.name)",
                         window: model.window,
+                        now: now,
                         badge: model.isActive ? "active" : nil,
-                        note: state.perModelStaleNote)
+                        note: state.perModelStaleNote(now: now))
                 } else {
                     // Seen in a prior run but absent from the current snapshot: the per-model
                     // supplement (usage endpoint) hasn't answered yet — often because it's
                     // rate-limited. Render a blank bar so it's clear the row is pending, not
                     // that the limit is empty.
-                    WindowRow(title: "Weekly · \(name)", window: nil, badge: "unavailable")
+                    WindowRow(title: "Weekly · \(name)", window: nil, now: now, badge: "unavailable")
                 }
             }
         }
     }
 
-    private var footer: some View {
+    private func footer(now: Date) -> some View {
         HStack(spacing: 10) {
             if let updated = state.lastUpdated {
                 Text(
                     state.health.isError
-                        ? "stale · \(Format.staleness(since: updated))"
-                        : "updated \(Format.staleness(since: updated))"
+                        ? "stale · \(Format.staleness(since: updated, now: now))"
+                        : "updated \(Format.staleness(since: updated, now: now))"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -144,6 +163,8 @@ private struct HealthBanner: View {
 private struct WindowRow: View {
     let title: String
     let window: UsageWindow?
+    /// The popover's ticking clock — every relative string is measured from it.
+    let now: Date
     var badge: String? = nil
     /// Optional muted footnote, e.g. "updated 2h ago" when this row's data is stale.
     var note: String? = nil
@@ -176,7 +197,7 @@ private struct WindowRow: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else if let reset = window?.resetsAt {
-                Text("resets \(Format.resetStamp(reset)) · in \(Format.countdown(to: reset))")
+                Text("resets \(Format.resetStamp(reset, now: now)) · in \(Format.countdown(to: reset, from: now))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -187,6 +208,7 @@ private struct WindowRow: View {
 private struct ForecastSection: View {
     let fiveHour: FiveHourVerdict
     let weeklyForecasts: [AppState.WeeklyForecast]
+    let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -233,15 +255,15 @@ private struct ForecastSection: View {
         case .noData:
             return "5-hour: collecting data…"
         case .exhausted(let reset):
-            if let reset { return "5-hour limit reached — resets \(Format.clockTime(reset))." }
+            if let reset { return "5-hour limit reached — resets \(Format.resetStamp(reset, now: now))." }
             return "5-hour limit reached."
         case .idle:
             return "5-hour: not burning right now."
         case .onPace(_, let reset):
-            return "5-hour: pace is fine — resets \(Format.clockTime(reset)) before you'd hit it."
+            return "5-hour: pace is fine — resets \(Format.resetStamp(reset, now: now)) before you'd hit it."
         case .willHitWall(let eta, let reset, _):
-            var text = "5-hour: wall ≈ \(Format.clockTime(eta)) at this pace — in \(Format.countdown(to: eta))"
-            if let reset { text += ", before reset (\(Format.countdown(to: reset)))" }
+            var text = "5-hour: wall ≈ \(Format.clockTime(eta)) at this pace — in \(Format.countdown(to: eta, from: now))"
+            if let reset { text += ", before reset (\(Format.countdown(to: reset, from: now)))" }
             return text + "."
         }
     }
@@ -252,12 +274,12 @@ private struct ForecastSection: View {
         case .noData:
             return "\(name): collecting data…"
         case .exhausted(let reset):
-            if let reset { return "\(name) reached — resets \(Format.weekday(reset)) \(Format.clockTime(reset))." }
+            if let reset { return "\(name) reached — resets \(Format.resetStamp(reset, now: now))." }
             return "\(name) reached."
         case .paceFine:
             return "\(name): pace is fine."
         case .likelyExhaustion(let earliest, let latest, _, _):
-            return "\(name): runs out \(Format.etaRange(earliest: earliest, latest: latest)) at this pace."
+            return "\(name): runs out \(Format.etaRange(earliest: earliest, latest: latest, now: now)) at this pace."
         }
     }
 }
