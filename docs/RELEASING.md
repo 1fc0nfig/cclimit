@@ -9,16 +9,23 @@ an `appcast.xml` that points at the zip and carries its EdDSA signature.
 - **EdDSA signing key** — generated once with Sparkle's `generate_keys`; the private key
   lives in the login Keychain, the public key is baked into `Info.plist` as `SUPublicEDKey`
   (see `scripts/make-app.sh`). Never commit the private key.
-- **Apple Developer ID** *(pending)* — until the app is Developer ID signed **and
-  notarized**, downloads run on other Macs only via right-click → Open. Notarization is the
-  last gate before a promoted public launch (see `docs/PLAN.md`).
+- **Developer ID cert**: a "Developer ID Application" certificate in the login Keychain.
+  `scripts/make-app.sh` picks it first and signs with the hardened runtime and a timestamp.
+- **Notary profile**: store the notary credentials once, under the profile `cclimit-notary`:
+  ```bash
+  xcrun notarytool store-credentials cclimit-notary --apple-id <apple-id> --team-id <team-id>
+  ```
+  It asks for an app-specific password from appleid.apple.com.
 
 ## Cut a release
 
 ```bash
-VERSION=0.2.0 make dmg          # dist/cclimit-0.2.0.dmg  (drag-install image)
-VERSION=0.2.0 scripts/release.sh # dist/cclimit-0.2.0.zip + dist/appcast.xml (signed)
+VERSION=1.1.0 scripts/release.sh
 ```
+
+It builds the app, notarizes and staples it, zips it for Sparkle, builds and notarizes the
+disk image, and writes the appcast. Output: `dist/cclimit-1.1.0.zip`, `dist/cclimit-1.1.0.dmg`,
+and `dist/appcast.xml`.
 
 Then publish:
 

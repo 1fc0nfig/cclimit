@@ -16,6 +16,8 @@ Tagline candidates:
 
 Claude Code subscription plans (Pro/Max) enforce two rolling limits: a **5-hour session window** and a **7-day weekly cap**, with additional per-model weekly caps (Sonnet/Opus) on some plans. Hitting either one mid-session hard-stops your work with no warning. Checking usage means running `/usage` inside a session or opening claude.ai — friction every time you wonder how much is left. There is also **peak-hour throttling** (weekdays, roughly 5–11 AM PT per recent reports), which makes limits even less predictable.
 
+> **2026-10-31:** Anthropic removed the 5-hour window from Ultra (formerly Max 20x), account by account. The weekly caps stay. cclimit shows the 5-hour window only for an account that still reports it.
+
 For someone running multiple agents in parallel (headless runners, worktrees, orchestrated sessions), burn rate is invisible until it isn't.
 
 ## 2. Market reality check (do this with eyes open)
@@ -156,7 +158,7 @@ Parse `~/.claude/projects/**/*.jsonl` and estimate windows locally. Fast and off
 
 **v1.0 wedge:** agent-fleet awareness — attribute burn to projects/sessions via local JSONL enrichment ("gitsocket runner ate 60 % of today's window"), which no competitor does and which matches the multi-agent-orchestration story you're already telling in job applications.
 
-**Explicit non-goals (v1):** multi-account profiles, cost/dollar analytics, Windows/Linux, statusline integration, iOS companion. Competitors do these; CClimit stays a gauge that predicts.
+**Explicit non-goals (v1):** Windows/Linux, statusline integration, iOS companion. Competitors do these. CClimit stays a gauge that predicts. (Multi-account left this list on 2026-10-23. Dollar estimates left it on 2026-11-04 as a lens on project stats, not as billing analytics. See PLAN.md.)
 
 ## 8. Marketing
 

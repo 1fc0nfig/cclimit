@@ -1,6 +1,6 @@
 #!/bin/bash
 # Assemble a runnable cclimit.app from the SPM build product.
-# Ad-hoc signed for local development; Developer ID signing comes later (docs/PLAN.md).
+# Signed with the best identity in the keychain: Developer ID for releases (see below).
 set -euo pipefail
 
 CONFIG="${1:-debug}"
@@ -54,28 +54,47 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>SUFeedURL</key><string>$SPARKLE_FEED_URL</string>
 	<key>SUPublicEDKey</key><string>$SPARKLE_PUBLIC_KEY</string>
 	<key>SUEnableAutomaticChecks</key><true/>
+	<!-- The CLI proxy is a host the user picks, usually plain http on a LAN or tailnet.
+	     ATS refuses every http load without this, so the proxy could never connect. -->
+	<key>NSAppTransportSecurity</key>
+	<dict><key>NSAllowsArbitraryLoads</key><true/></dict>
 </dict>
 </plist>
 PLIST
 
-# Keychain consent for reading Claude Code's token only persists if macOS can validate the
-# app's signature chain. Prefer a *valid* (Apple-trusted) identity: an untrusted self-signed
-# cert signs fine but fails ACL validation, so "Always Allow" never sticks and every token
-# read re-prompts. Order: Apple Development > CClimit Dev (works only if the user marked it
-# trusted in Keychain Access) > ad-hoc (re-prompts every rebuild).
-if APPLE_DEV="$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"')" && [ -n "$APPLE_DEV" ]; then
+# Signing identity, best first. A release for other Macs needs "Developer ID Application":
+# it is the only one notarization accepts. Apple Development and the local "CClimit Dev"
+# cert are for this Mac. SIGN_IDENTITY overrides the choice.
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null)"
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    :
+elif DEV_ID="$(echo "$IDENTITIES" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')" && [ -n "$DEV_ID" ]; then
+    SIGN_IDENTITY="$DEV_ID"
+elif APPLE_DEV="$(echo "$IDENTITIES" | grep -o '"Apple Development: [^"]*"' | head -1 | tr -d '"')" && [ -n "$APPLE_DEV" ]; then
     SIGN_IDENTITY="$APPLE_DEV"
-elif security find-identity -v -p codesigning 2>/dev/null | grep -q "CClimit Dev"; then
+elif echo "$IDENTITIES" | grep -q "CClimit Dev"; then
     SIGN_IDENTITY="CClimit Dev"
 else
     SIGN_IDENTITY="-"
 fi
 
-# Sign inside-out: the embedded framework (and its nested helpers) before the app that
-# contains it, or the outer signature is invalidated. `--deep` is fine for the dev cert;
-# Developer ID + notarization will sign each helper explicitly (docs/PLAN.md).
-codesign --force --deep --sign "$SIGN_IDENTITY" "$APP/Contents/Frameworks/Sparkle.framework"
-codesign --force --sign "$SIGN_IDENTITY" "$APP"
+# Sign inside-out: each nested helper, then the framework, then the app, or the outer
+# signature is invalidated. Developer ID adds the hardened runtime and a secure timestamp,
+# which notarization requires. The order and flags follow Sparkle's own guide.
+FW="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ "$SIGN_IDENTITY" == "Developer ID Application:"* ]]; then
+    SIGN=(codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY")
+    "${SIGN[@]}" "$FW/Versions/B/XPCServices/Installer.xpc"
+    "${SIGN[@]}" --preserve-metadata=entitlements "$FW/Versions/B/XPCServices/Downloader.xpc"
+    "${SIGN[@]}" "$FW/Versions/B/Autoupdate"
+    "${SIGN[@]}" "$FW/Versions/B/Updater.app"
+    "${SIGN[@]}" "$FW"
+    "${SIGN[@]}" "$APP"
+    codesign --verify --deep --strict "$APP"
+else
+    codesign --force --deep --sign "$SIGN_IDENTITY" "$FW"
+    codesign --force --sign "$SIGN_IDENTITY" "$APP"
+fi
 
 if [ "$SIGN_IDENTITY" = "-" ]; then
     echo "Built $APP ($CONFIG) — ad-hoc signed (run 'make dev-cert' for stable consent)"

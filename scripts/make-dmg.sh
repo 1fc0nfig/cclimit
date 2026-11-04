@@ -14,7 +14,10 @@ DMG="$ROOT/dist/cclimit-$VERSION.dmg"
 command -v create-dmg >/dev/null || { echo "need create-dmg: brew install create-dmg" >&2; exit 1; }
 
 mkdir -p "$ROOT/dist"
-VERSION="$VERSION" BUILD="$BUILD" "$ROOT/scripts/make-app.sh" release
+# release.sh builds and notarizes the app first, then sets SKIP_BUILD=1 to package it as is.
+if [ -z "${SKIP_BUILD:-}" ]; then
+    VERSION="$VERSION" BUILD="$BUILD" "$ROOT/scripts/make-app.sh" release
+fi
 
 # create-dmg builds the Applications symlink itself, so stage only the app.
 STAGE="$(mktemp -d)"
@@ -36,4 +39,9 @@ create-dmg \
     "$DMG" "$STAGE" || true   # create-dmg returns non-zero on benign codesign-of-volicon skips
 
 [ -f "$DMG" ] || { echo "DMG build failed" >&2; exit 1; }
+# A Developer ID signature on the image itself, so Gatekeeper checks it before mounting.
+DEV_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)"
+if [ -n "$DEV_ID" ]; then
+    codesign --force --timestamp --sign "$DEV_ID" "$DMG"
+fi
 echo "Built $DMG"
