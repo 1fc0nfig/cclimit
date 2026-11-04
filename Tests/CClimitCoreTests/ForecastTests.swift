@@ -30,6 +30,35 @@ final class ForecastTests: XCTestCase {
         XCTAssertEqual(ForecastEngine.fiveHourProjection(samples: samples, now: now), .none)
     }
 
+    /// Seen live on 2026-11-04: weekly read 64 then 63 with the same reset time. The drop
+    /// read as a rollover, dropped three days of history, and every weekly forecast vanished.
+    func testOnePointWobbleIsNotAReset() {
+        let reset = now.addingTimeInterval(2 * 24 * 3600)
+        var samples = (0..<48).map { h in
+            sample(minutesAgo: Double(48 - h) * 60, fiveHour: nil, weekly: 40 + Double(h) / 2,
+                   weeklyReset: reset)
+        }
+        samples.append(sample(minutesAgo: 20, fiveHour: nil, weekly: 64, weeklyReset: reset))
+        samples.append(sample(minutesAgo: 10, fiveHour: nil, weekly: 63, weeklyReset: reset))
+        samples.append(sample(minutesAgo: 0, fiveHour: nil, weekly: 64, weeklyReset: reset))
+        XCTAssertNotEqual(ForecastEngine.weeklyProjection(samples: samples, now: now), .none)
+        XCTAssertEqual(
+            ForecastEngine.trimAfterReset(samples, value: { $0.sevenDayUtil }, reset: { $0.sevenDayReset }).count,
+            samples.count)
+    }
+
+    /// A big drop is a rollover even when the reset time does not move (an early reset).
+    func testBigDropWithSameResetTimeIsAReset() {
+        let reset = now.addingTimeInterval(24 * 3600)
+        let samples = [
+            sample(minutesAgo: 60, fiveHour: nil, weekly: 55, weeklyReset: reset),
+            sample(minutesAgo: 30, fiveHour: nil, weekly: 0, weeklyReset: reset),
+            sample(minutesAgo: 0, fiveHour: nil, weekly: 1, weeklyReset: reset),
+        ]
+        XCTAssertEqual(
+            ForecastEngine.trimAfterReset(samples, value: { $0.sevenDayUtil }, reset: { $0.sevenDayReset }).count, 2)
+    }
+
     func testNoSamplesMeansNoData() {
         XCTAssertEqual(ForecastEngine.fiveHour(samples: [], now: now), .noData)
     }

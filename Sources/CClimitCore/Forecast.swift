@@ -81,7 +81,7 @@ public enum ForecastEngine {
     ) -> FiveHourVerdict {
         let recent = trimAfterReset(
             samples.filter { $0.ts >= now.addingTimeInterval(-lookback) },
-            value: { $0.fiveHourUtil })
+            value: { $0.fiveHourUtil }, reset: { $0.fiveHourReset })
         guard let last = recent.last, let current = last.fiveHourUtil else { return .noData }
         let reset = last.fiveHourReset
 
@@ -126,7 +126,7 @@ public enum ForecastEngine {
         case .onPace(let utilization, let resetsAt):
             let recent = trimAfterReset(
                 samples.filter { $0.ts >= now.addingTimeInterval(-lookback) },
-                value: { $0.fiveHourUtil })
+                value: { $0.fiveHourUtil }, reset: { $0.fiveHourReset })
             guard let slope = burnSlope(recent) else { return .none }
             let projected = utilization + slope * max(resetsAt.timeIntervalSince(now), 0)
             return Projection(atReset: min(projected, 100), wall: nil)
@@ -156,7 +156,8 @@ public enum ForecastEngine {
         case .paceFine(let utilization, let resetsAt):
             guard let resetsAt else { return .none }
             let recent = trimAfterReset(
-                samples.filter { $0.ts >= now.addingTimeInterval(-weeklyLookback) }, value: value)
+                samples.filter { $0.ts >= now.addingTimeInterval(-weeklyLookback) },
+                value: value, reset: reset)
             // The sustained pace is how the week has really gone. The recent pace stands in
             // only while there are not enough hours for a sustained one.
             let rate = pace(of: recent, value: value, minSpan: 3600, minRise: 1.0)
@@ -194,7 +195,7 @@ public enum ForecastEngine {
     ) -> WeeklyVerdict {
         let recent = trimAfterReset(
             samples.filter { $0.ts >= now.addingTimeInterval(-weeklyLookback) },
-            value: value)
+            value: value, reset: reset)
         guard let last = recent.last, let current = value(last) else { return .noData }
         let resetsAt = reset(last)
 
@@ -263,15 +264,29 @@ public enum ForecastEngine {
     }
 
     /// A utilization drop means the window rolled over; only samples after the
-    /// last drop describe the current window.
-    static func trimAfterReset(_ samples: [Sample], value: (Sample) -> Double?) -> [Sample] {
+    /// last drop describe the current window. Readings wobble by a point between polls
+    /// (64 → 63 with the same reset time), so a small drop counts only when the reset
+    /// time moved later too. Without reset times, any drop counts.
+    static func trimAfterReset(
+        _ samples: [Sample], value: (Sample) -> Double?, reset: (Sample) -> Date?
+    ) -> [Sample] {
         let valued = samples.filter { value($0) != nil }
         var lastDrop = 0
         for i in 1..<max(valued.count, 1) {
-            if let prev = value(valued[i - 1]), let cur = value(valued[i]), cur < prev - 0.5 {
+            guard let prev = value(valued[i - 1]), let cur = value(valued[i]), cur < prev - 0.5
+            else { continue }
+            if prev - cur >= minResetDrop {
+                lastDrop = i
+            } else if let before = reset(valued[i - 1]), let after = reset(valued[i]) {
+                if after.timeIntervalSince(before) > resetJitter { lastDrop = i }
+            } else {
                 lastDrop = i
             }
         }
         return Array(valued.suffix(from: min(lastDrop, max(valued.count - 1, 0))))
     }
+    /// A drop this large is a rollover even when the reset time stays put (an early reset).
+    static let minResetDrop: Double = 3
+    /// Reset times jitter by a second (08:59:59 vs 09:00:00). A rollover moves them by hours.
+    static let resetJitter: TimeInterval = 60
 }

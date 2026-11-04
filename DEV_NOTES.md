@@ -39,3 +39,7 @@ Append-only log of decisions and why. Newest last. The full design notes live in
   needs an index-wide key set (about 150k keys). Not worth it for a 1% overcount.
 - **Fixed (found while checking the release build).** A burn now needs 10 minutes of samples.
   Readings come in whole percents, so 1% → 2% in 30 s after a reset drew a full red forecast.
+- **Fixed (seen after the v0.2.0 update).** Weekly forecasts vanished. Readings wobble by a
+  point (64 → 63) with the same reset time, and any drop over 0.5 read as a rollover, so three
+  days of history were cut to minutes. A drop under 3 points now counts only when the reset time
+  moved later.
