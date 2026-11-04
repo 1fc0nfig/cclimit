@@ -145,6 +145,10 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         return legacy
     }
 
+    /// A reading with a weekly cap but no 5-hour window: an account whose 5-hour limit is gone
+    /// (Ultra, from 2026-10-31; other plans may follow). Views drop the 5h row, meter, and bar.
+    public var lacksFiveHour: Bool { fiveHour == nil && sevenDay != nil }
+
     /// The window closer to its cap — drives the menu bar icon. Includes per-model limits,
     /// so an active model cap (e.g. Fable at 66%) correctly binds the icon.
     public var mostConstrained: UsageWindow? {

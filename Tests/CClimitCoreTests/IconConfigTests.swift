@@ -46,21 +46,26 @@ final class IconConfigTests: XCTestCase {
 final class SectionLayoutTests: XCTestCase {
     func testDefaultOrderWhenNothingStored() {
         let order = SectionLayout.ordered(stored: [], seenModels: ["Fable"])
-        XCTAssertEqual(order, ["fiveHour", "weekly", "model:Fable", "forecast", "attribution"])
+        XCTAssertEqual(order, ["fiveHour", "weekly", "model:Fable", "attribution"])
     }
 
     func testStoredOrderIsHonored() {
-        let stored = ["forecast", "weekly", "fiveHour", "attribution"]
+        let stored = ["attribution", "weekly", "fiveHour"]
         let order = SectionLayout.ordered(stored: stored, seenModels: [])
-        XCTAssertEqual(order.prefix(4).map { $0 }, stored)
+        XCTAssertEqual(order, stored)
     }
 
     func testNewModelIsAppendedNotLost() {
         // User reordered; then Fable appears for the first time.
-        let stored = ["weekly", "fiveHour", "forecast", "attribution"]
+        let stored = ["weekly", "fiveHour", "attribution"]
         let order = SectionLayout.ordered(stored: stored, seenModels: ["Fable"])
-        XCTAssertEqual(order.prefix(4).map { $0 }, stored)
+        XCTAssertEqual(order.prefix(3).map { $0 }, stored)
         XCTAssertTrue(order.contains("model:Fable"))
+    }
+
+    func testRetiredForecastSectionDropsOut() {
+        let order = SectionLayout.ordered(stored: ["forecast", "weekly"], seenModels: [])
+        XCTAssertFalse(order.contains("forecast"))
     }
 
     func testStaleSectionsAreDropped() {

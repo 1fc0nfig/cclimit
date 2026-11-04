@@ -57,9 +57,16 @@ public enum IconResolver {
     ) -> IconDescriptor {
         switch style {
         case .dualBars:
+            let weekly = IconDescriptor.Bar(name: "weekly", value: snapshot?.sevenDay?.utilization)
+            if let snapshot, snapshot.lacksFiveHour {
+                // No 5-hour limit (Ultra): weekly on top, the fullest model cap below it.
+                let bars = [weekly] + [mostConstrainedModel(in: snapshot)].compactMap { $0 }
+                return IconDescriptor(
+                    content: .stacked(bars), summary: bars.map(\.name).joined(separator: " + "))
+            }
             var bars = [
                 IconDescriptor.Bar(name: "5-hour", value: snapshot?.fiveHour?.utilization),
-                IconDescriptor.Bar(name: "weekly", value: snapshot?.sevenDay?.utilization),
+                weekly,
             ]
             if thirdModelBar {
                 if let third = mostConstrainedModel(in: snapshot) {
@@ -76,6 +83,13 @@ public enum IconResolver {
                 summary: bars.map(\.name).joined(separator: " + "))
 
         case .bars:
+            // A 5h bar on an account without a 5-hour limit drops out. Weekly takes its
+            // place when nothing else would remain.
+            var composition = composition
+            if let snapshot, snapshot.lacksFiveHour {
+                composition.removeAll { $0.ref == .fiveHour }
+                if composition.isEmpty { composition = [BarItem(ref: .weekly)] }
+            }
             let inline = composition.map { item in
                 IconDescriptor.InlineBar(
                     item: item,
@@ -116,7 +130,8 @@ public enum IconResolver {
     /// Names the window a source resolves to, so "most constrained" isn't a mystery.
     private static func sourceLabel(_ source: IconSource, in snapshot: UsageSnapshot?) -> String {
         switch source {
-        case .fiveHour: return "5-hour window"
+        case .fiveHour:
+            return snapshot?.lacksFiveHour == true ? "weekly cap (no 5-hour limit)" : "5-hour window"
         case .weekly: return "weekly cap"
         case .model(let name): return "\(name) weekly"
         case .auto:

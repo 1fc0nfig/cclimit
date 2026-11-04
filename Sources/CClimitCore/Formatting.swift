@@ -98,6 +98,47 @@ public enum Format {
         "\(Int(value.rounded()))%"
     }
 
+    /// "840", "12k", "1.4M", "2.1B": token counts at a glance.
+    public static func tokens(_ count: Int) -> String {
+        let value = Double(count)
+        guard value >= 1_000 else { return "\(count)" }
+        // Round first, then pick the unit: 999,600 reads "1.0M", not "1000k".
+        let units: [(Double, String)] = [(1_000, "k"), (1_000_000, "M"), (1_000_000_000, "B")]
+        for (index, (divisor, unit)) in units.enumerated() {
+            let x = value / divisor
+            let isLast = index == units.count - 1
+            if x < 9.95 { return String(format: "%.1f", x) + unit }
+            if x.rounded() < 1000 || isLast { return String(Int(x.rounded())) + unit }
+        }
+        return "\(count)"
+    }
+
+    /// API list-price value in US dollars: "$0.42", "$70", "$3,325", "$12.3k". "<$0.01" for
+    /// a trace, so a real cost never reads as zero.
+    public static func dollars(_ amount: Double) -> String {
+        switch amount {
+        case ..<0.005: return amount > 0 ? "<$0.01" : "$0"
+        case ..<10: return String(format: "$%.2f", amount)
+        case ..<10_000:
+            let whole = Int(amount.rounded())
+            return whole < 1000 ? "$\(whole)" : "$\(whole / 1000),\(String(format: "%03d", whole % 1000))"
+        default:
+            let k = amount / 1000
+            return k < 100 ? String(format: "$%.1fk", k) : "$\(Int(k.rounded()))k"
+        }
+    }
+
+    /// "claude-opus-5-5" → "Opus 5.5", "claude-haiku-4-5-20251001" → "Haiku 4.5".
+    public static func modelName(_ raw: String) -> String {
+        var parts = raw.split(separator: "-").map(String.init)
+        if parts.first == "claude" { parts.removeFirst() }
+        if let last = parts.last, last.count == 8, last.allSatisfy(\.isNumber) { parts.removeLast() }
+        guard let family = parts.first(where: { !$0.allSatisfy(\.isNumber) }) else { return raw }
+        let version = parts.filter { $0.allSatisfy(\.isNumber) }.joined(separator: ".")
+        let name = family.prefix(1).uppercased() + family.dropFirst()
+        return version.isEmpty ? name : "\(name) \(version)"
+    }
+
     /// "stale · 12m ago"
     public static func staleness(since lastUpdated: Date, now: Date = Date()) -> String {
         let minutes = Int(now.timeIntervalSince(lastUpdated) / 60)

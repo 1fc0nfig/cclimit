@@ -10,6 +10,15 @@ final class Notifier {
     // UNUserNotificationCenter aborts without a bundle (bare `swift run`); guard it.
     private let available = Bundle.main.bundleIdentifier != nil
     private var authorizationRequested = false
+    /// Keeps each account's "already notified" flags apart. Empty for the default login,
+    /// so flags written before multi-account support still count.
+    private let keySuffix: String
+    /// "Work" while several accounts show, so a notification names the login it is about.
+    private var accountLabel: String?
+
+    init(keySuffix: String = "") {
+        self.keySuffix = keySuffix
+    }
 
     private var thresholds: [Int] {
         [
@@ -18,8 +27,11 @@ final class Notifier {
         ].filter { (1...100).contains($0) }
     }
 
-    func evaluate(snapshot: UsageSnapshot, fiveHourVerdict: FiveHourVerdict, now: Date) {
+    func evaluate(
+        snapshot: UsageSnapshot, fiveHourVerdict: FiveHourVerdict, now: Date, accountLabel: String? = nil
+    ) {
         guard available else { return }
+        self.accountLabel = accountLabel
 
         check(window: snapshot.fiveHour, name: "5-hour window", key: "5h")
         check(window: snapshot.sevenDay, name: "weekly cap", key: "7d")
@@ -54,16 +66,16 @@ final class Notifier {
     }
 
     private func fireOnce(key: String, title: String, body: String) {
-        let defaultsKey = "notified.\(key)"
+        let defaultsKey = "notified\(keySuffix).\(key)"
         guard !defaults.bool(forKey: defaultsKey) else { return }
         defaults.set(true, forKey: defaultsKey)
 
         requestAuthorizationIfNeeded()
         let content = UNMutableNotificationContent()
-        content.title = title
+        content.title = accountLabel.map { "\($0): \(title)" } ?? title
         content.body = body
         let request = UNNotificationRequest(
-            identifier: key, content: content, trigger: nil)
+            identifier: key + keySuffix, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
 

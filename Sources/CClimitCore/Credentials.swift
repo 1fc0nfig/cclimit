@@ -8,13 +8,24 @@ public struct OAuthCredentials: Equatable, Sendable {
     public let refreshToken: String?
     public let expiresAt: Date?
     public let scopes: [String]
+    /// Plan metadata Claude Code stores next to the token, e.g. "max" + "default_claude_max_5x".
+    /// Drives the plan badge and the capacity weight when accounts are pooled.
+    public let subscriptionType: String?
+    public let rateLimitTier: String?
 
-    public init(accessToken: String, refreshToken: String?, expiresAt: Date?, scopes: [String]) {
+    public init(
+        accessToken: String, refreshToken: String?, expiresAt: Date?, scopes: [String],
+        subscriptionType: String? = nil, rateLimitTier: String? = nil
+    ) {
         self.accessToken = accessToken
         self.refreshToken = refreshToken
         self.expiresAt = expiresAt
         self.scopes = scopes
+        self.subscriptionType = subscriptionType
+        self.rateLimitTier = rateLimitTier
     }
+
+    public var plan: PlanTier { PlanTier(subscriptionType: subscriptionType, rateLimitTier: rateLimitTier) }
 
     /// The usage endpoint needs user:profile; setup-tokens (inference only) get 403.
     public var hasProfileScope: Bool { scopes.contains("user:profile") }
@@ -57,7 +68,9 @@ enum CredentialJSON {
             accessToken: token,
             refreshToken: oauth["refreshToken"] as? String,
             expiresAt: expires,
-            scopes: oauth["scopes"] as? [String] ?? []
+            scopes: oauth["scopes"] as? [String] ?? [],
+            subscriptionType: oauth["subscriptionType"] as? String,
+            rateLimitTier: oauth["rateLimitTier"] as? String
         )
     }
 }
@@ -112,22 +125,21 @@ public struct SecurityToolCredentialSource: CredentialSource {
     }
 
     public func load() throws -> OAuthCredentials {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: toolPath)
-        process.arguments = ["find-generic-password", "-s", service, "-w"]
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
+        // A locked Keychain can make `security` wait on an unlock dialog. Thirty seconds
+        // covers typing a password, and a hung read no longer holds a poll forever.
+        let result: ChildProcess.Result
         do {
-            try process.run()
+            result = try ChildProcess.run(
+                URL(fileURLWithPath: toolPath),
+                arguments: ["find-generic-password", "-s", service, "-w"],
+                timeout: 30)
         } catch {
             throw CredentialError.notFound
         }
-        // Read before waiting: a full pipe buffer would otherwise block the child forever.
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        if result.timedOut { throw CredentialError.accessDenied }
+        let data = result.output
 
-        switch process.terminationStatus {
+        switch result.status {
         case 0:
             return try CredentialJSON.parse(Self.decode(data))
         case 44:  // errSecItemNotFound
@@ -135,7 +147,7 @@ public struct SecurityToolCredentialSource: CredentialSource {
         case 51, 128:  // errSecAuthFailed / errSecUserCanceled (low byte of -128)
             throw CredentialError.accessDenied
         default:
-            throw CredentialError.malformed("security exited \(process.terminationStatus)")
+            throw CredentialError.malformed("security exited \(result.status)")
         }
     }
 
@@ -166,6 +178,11 @@ public struct FileCredentialSource: CredentialSource {
         self.url = url
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent(".claude/.credentials.json")
+    }
+
+    /// The credentials file inside a `CLAUDE_CONFIG_DIR` (same name as the default one).
+    public init(configDir: URL) {
+        self.url = configDir.appendingPathComponent(".credentials.json")
     }
 
     public func load() throws -> OAuthCredentials {

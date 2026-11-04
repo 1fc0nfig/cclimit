@@ -72,7 +72,7 @@ public enum IconSource: Equatable, Sendable {
     public func binding(in snapshot: UsageSnapshot) -> UsageWindow? {
         switch self {
         case .auto: return snapshot.mostConstrained
-        case .fiveHour: return snapshot.fiveHour
+        case .fiveHour: return snapshot.lacksFiveHour ? snapshot.sevenDay : snapshot.fiveHour
         case .weekly: return snapshot.sevenDay
         case .model(let name):
             return snapshot.perModelWindows.first { $0.name == name }?.window

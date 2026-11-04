@@ -8,6 +8,11 @@ public enum UsageError: Error, Equatable {
     case rateLimited(retryAfter: TimeInterval?) // 429 — honor Retry-After (observed ~1300s penalties)
     case offline
     case schemaChanged(String) // decode failure or unexpected status — endpoint drifted
+    case claudeCodeNotFound    // usage through Claude Code, but no `claude` executable found
+    case claudeCodeFailed(String) // `claude` started but gave no answer: hung, crashed, or timed out
+    case proxyKeyRejected      // CLI proxy refused the management key; retrying earns an IP ban
+    case proxyBanned(retryAfter: TimeInterval?) // CLI proxy banned this IP after wrong keys
+    case proxyLoginGone        // the proxy no longer holds this login
 }
 
 /// Client for the undocumented endpoint behind Claude Code's /usage.

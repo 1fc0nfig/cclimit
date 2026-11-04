@@ -27,11 +27,37 @@ public enum WeeklyVerdict: Equatable, Sendable {
     case likelyExhaustion(earliest: Date, latest: Date, resetsAt: Date?, utilization: Double)
 }
 
+/// A forecast in the shape the bars draw: where the window lands at reset at this pace,
+/// and when it runs out if that comes first. Both nil while there is no pace to project.
+public struct Projection: Equatable, Sendable {
+    public enum Wall: Equatable, Sendable {
+        case reached
+        case at(Date)
+        case between(Date, Date)
+    }
+
+    /// Utilization (0–100) expected at reset, capped at 100.
+    public let atReset: Double?
+    public let wall: Wall?
+
+    public init(atReset: Double?, wall: Wall?) {
+        self.atReset = atReset
+        self.wall = wall
+    }
+
+    public static let none = Projection(atReset: nil, wall: nil)
+}
+
 public enum ForecastEngine {
     // 5h tuning: at least 3 samples over the last 15 min showing >= 1 percentage point
     // of movement before we call it a burn — the API reports coarse percentages, so
     // smaller deltas are indistinguishable from noise.
-    static let burnLookback: TimeInterval = 15 * 60
+    public static let burnLookback: TimeInterval = 15 * 60
+    /// The window that holds three samples at a given poll spacing. At 10-minute polls
+    /// (usage through Claude Code) 15 minutes holds two, and the 5h forecast never spoke.
+    public static func burnLookback(pollInterval: TimeInterval) -> TimeInterval {
+        max(burnLookback, pollInterval * Double(minBurnSamples - 1) + pollInterval / 2)
+    }
     static let minBurnSamples = 3
     static let minBurnRise: Double = 1.0
     static let exhaustedAt: Double = 99.5
@@ -41,29 +67,26 @@ public enum ForecastEngine {
     static let weeklyLookback: TimeInterval = 3 * 24 * 3600
     static let recentLookback: TimeInterval = 6 * 3600
     static let maxWeeklyHorizon: TimeInterval = 8 * 24 * 3600
+    /// A burst predicts the next day and a half, not the rest of the week. Past this horizon
+    /// it gives way to the sustained pace, so one busy evening does not warn for days.
+    static let maxBurstHorizon: TimeInterval = 36 * 3600
     /// With only one pace to go on, the ETA gets an honest ±15% uncertainty stripe.
     static let singleRateStripe = 0.15
 
-    public static func fiveHour(samples: [Sample], now: Date) -> FiveHourVerdict {
+    public static func fiveHour(
+        samples: [Sample], now: Date, lookback: TimeInterval = burnLookback
+    ) -> FiveHourVerdict {
         let recent = trimAfterReset(
-            samples.filter { $0.ts >= now.addingTimeInterval(-burnLookback) },
+            samples.filter { $0.ts >= now.addingTimeInterval(-lookback) },
             value: { $0.fiveHourUtil })
         guard let last = recent.last, let current = last.fiveHourUtil else { return .noData }
         let reset = last.fiveHourReset
 
         if current >= exhaustedAt { return .exhausted(resetsAt: reset) }
 
-        guard
-            recent.count >= minBurnSamples,
-            let first = recent.first?.fiveHourUtil,
-            let firstTs = recent.first?.ts,
-            current - first >= minBurnRise,
-            last.ts > firstTs
-        else {
+        guard let slope = burnSlope(recent) else {
             return .idle(utilization: current, resetsAt: reset)
         }
-
-        let slope = (current - first) / last.ts.timeIntervalSince(firstTs) // points per second
         let secondsToWall = (100 - current) / slope
         let eta = now.addingTimeInterval(secondsToWall)
 
@@ -71,6 +94,76 @@ public enum ForecastEngine {
             return .onPace(utilization: current, resetsAt: reset)
         }
         return .willHitWall(eta: eta, resetsAt: reset, utilization: current)
+    }
+
+    /// Points per second across the 5h burn lookback, or nil when usage isn't moving enough
+    /// to call it a burn (fewer than 3 samples, or a rise inside API noise).
+    static func burnSlope(_ recent: [Sample]) -> Double? {
+        guard
+            recent.count >= minBurnSamples,
+            let first = recent.first, let firstUtil = first.fiveHourUtil,
+            let last = recent.last, let lastUtil = last.fiveHourUtil,
+            lastUtil - firstUtil >= minBurnRise,
+            last.ts > first.ts
+        else { return nil }
+        return (lastUtil - firstUtil) / last.ts.timeIntervalSince(first.ts)
+    }
+
+    /// Where the 5h bar lands at reset if this pace holds. Speaks only while burning.
+    public static func fiveHourProjection(
+        samples: [Sample], now: Date, lookback: TimeInterval = burnLookback
+    ) -> Projection {
+        switch fiveHour(samples: samples, now: now, lookback: lookback) {
+        case .noData, .idle:
+            return .none
+        case .exhausted:
+            return Projection(atReset: 100, wall: .reached)
+        case .willHitWall(let eta, _, _):
+            return Projection(atReset: 100, wall: .at(eta))
+        case .onPace(let utilization, let resetsAt):
+            let recent = trimAfterReset(
+                samples.filter { $0.ts >= now.addingTimeInterval(-lookback) },
+                value: { $0.fiveHourUtil })
+            guard let slope = burnSlope(recent) else { return .none }
+            let projected = utilization + slope * max(resetsAt.timeIntervalSince(now), 0)
+            return Projection(atReset: min(projected, 100), wall: nil)
+        }
+    }
+
+    /// Weekly counterpart: the sustained pace carried to reset, or the run-out band.
+    public static func weeklyProjection(samples: [Sample], now: Date) -> Projection {
+        weeklyProjection(samples: samples, now: now, value: { $0.sevenDayUtil }, reset: { $0.sevenDayReset })
+    }
+
+    public static func weeklyProjectionForModel(_ name: String, samples: [Sample], now: Date) -> Projection {
+        weeklyProjection(
+            samples: samples, now: now, value: { $0.modelUtil(name) }, reset: { $0.modelReset(name) })
+    }
+
+    static func weeklyProjection(
+        samples: [Sample], now: Date, value: (Sample) -> Double?, reset: (Sample) -> Date?
+    ) -> Projection {
+        switch weeklyVerdict(samples: samples, now: now, value: value, reset: reset) {
+        case .noData:
+            return .none
+        case .exhausted:
+            return Projection(atReset: 100, wall: .reached)
+        case .likelyExhaustion(let earliest, let latest, _, _):
+            return Projection(atReset: 100, wall: earliest == latest ? .at(earliest) : .between(earliest, latest))
+        case .paceFine(let utilization, let resetsAt):
+            guard let resetsAt else { return .none }
+            let recent = trimAfterReset(
+                samples.filter { $0.ts >= now.addingTimeInterval(-weeklyLookback) }, value: value)
+            // The sustained pace is how the week has really gone. The recent pace stands in
+            // only while there are not enough hours for a sustained one.
+            let rate = pace(of: recent, value: value, minSpan: 3600, minRise: 1.0)
+                ?? pace(
+                    of: recent.filter { $0.ts >= now.addingTimeInterval(-recentLookback) },
+                    value: value, minSpan: 1800, minRise: 0.5)
+            guard let rate else { return .none }
+            let projected = utilization + rate * max(resetsAt.timeIntervalSince(now), 0) / 3600
+            return Projection(atReset: min(projected, 100), wall: nil)
+        }
     }
 
     /// The overall (seven_day) weekly cap.
@@ -111,7 +204,9 @@ public enum ForecastEngine {
             value: value, minSpan: 1800, minRise: 0.5)
 
         let remaining = 100 - current
-        let horizons = [sustained, burst].compactMap { $0 }.map { remaining / $0 * 3600 }
+        let burstReach = burst.map { remaining / $0 * 3600 } ?? .infinity
+        let credibleBurst = sustained == nil || burstReach <= maxBurstHorizon ? burst : nil
+        let horizons = [sustained, credibleBurst].compactMap { $0 }.map { remaining / $0 * 3600 }
         guard let soonest = horizons.min(), let furthest = horizons.max(),
               soonest <= maxWeeklyHorizon
         else {

@@ -16,9 +16,10 @@ public enum SectionLayout {
     }
 
     /// The full set of sections that can exist, in canonical default order:
-    /// 5-hour, weekly, per-model windows, forecast, attribution.
+    /// 5-hour, weekly, per-model windows, attribution. The forecast has no section of its
+    /// own any more: each window row draws its projection. A stored "forecast" id drops out.
     public static func universe(seenModels: [String]) -> [String] {
-        [fiveHour, weekly] + seenModels.map(modelID) + [forecast, attribution]
+        [fiveHour, weekly] + seenModels.map(modelID) + [attribution]
     }
 
     /// Merge a stored order with the current universe: honor the stored order for anything
@@ -40,7 +41,7 @@ public enum SectionLayout {
         case fiveHour: return "5-hour window"
         case weekly: return "Weekly cap"
         case forecast: return "Forecast"
-        case attribution: return "Attribution"
+        case attribution: return "Projects"
         default:
             if let model = modelName(id) { return "\(model) (weekly)" }
             return id

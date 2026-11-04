@@ -97,10 +97,23 @@ public struct RateLimitProbe: Sendable {
     /// Build a UsageSnapshot from the unified rate-limit headers. Utilization arrives as a
     /// 0–1 fraction; we normalize to the 0–100 convention the rest of cclimit uses.
     public static func snapshot(from http: HTTPURLResponse) -> UsageSnapshot? {
+        snapshot { http.value(forHTTPHeaderField: $0) }
+    }
+
+    /// The same parse over any header store. CLIProxyAPI keeps the last headers it saw per
+    /// login as a dictionary, with its own key casing, so lookups ignore case.
+    public static func snapshot(headers: [String: String]) -> UsageSnapshot? {
+        let lowered = Dictionary(headers.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { a, _ in a })
+        return snapshot { lowered[$0.lowercased()] }
+    }
+
+    /// A window without 5h headers is an account with no 5-hour limit (Ultra since
+    /// 2026-10-31), so `fiveHour` stays nil instead of reading as an empty bar.
+    static func snapshot(value: (String) -> String?) -> UsageSnapshot? {
         func window(_ key: String) -> UsageWindow? {
             let base = "anthropic-ratelimit-unified-\(key)"
-            let utilRaw = http.value(forHTTPHeaderField: "\(base)-utilization")
-            let resetRaw = http.value(forHTTPHeaderField: "\(base)-reset")
+            let utilRaw = value("\(base)-utilization")
+            let resetRaw = value("\(base)-reset")
             let util = utilRaw.flatMap(Double.init)
             let reset = resetRaw.flatMap(Double.init).map { Date(timeIntervalSince1970: $0) }
             if util == nil && reset == nil { return nil }

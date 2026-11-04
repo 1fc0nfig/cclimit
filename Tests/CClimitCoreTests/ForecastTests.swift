@@ -32,6 +32,21 @@ final class ForecastTests: XCTestCase {
         XCTAssertEqual(utilization, 40.0)
     }
 
+    func testTenMinutePollsStillForecastABurn() {
+        // Usage through Claude Code polls every 10 minutes: the window must hold 3 samples.
+        let reset = now.addingTimeInterval(4 * 3600)
+        let samples = [
+            sample(minutesAgo: 20, fiveHour: 40, fiveHourReset: reset),
+            sample(minutesAgo: 10, fiveHour: 50, fiveHourReset: reset),
+            sample(minutesAgo: 0, fiveHour: 60, fiveHourReset: reset),
+        ]
+        XCTAssertEqual(ForecastEngine.burnLookback(pollInterval: 60), ForecastEngine.burnLookback)
+        let lookback = ForecastEngine.burnLookback(pollInterval: 600)
+        guard case .willHitWall = ForecastEngine.fiveHour(samples: samples, now: now, lookback: lookback) else {
+            return XCTFail("expected willHitWall")
+        }
+    }
+
     func testSteadyBurnHittingWallBeforeReset() {
         // 60 -> 70% over 10 minutes = 1 point/min; wall in ~30 min, reset in 2 h.
         let reset = now.addingTimeInterval(2 * 3600)
@@ -102,6 +117,55 @@ final class ForecastTests: XCTestCase {
         guard case .exhausted = ForecastEngine.fiveHour(samples: samples, now: now) else {
             return XCTFail("expected exhausted")
         }
+    }
+
+    // MARK: - Projections (what the bars draw)
+
+    func testIdleFiveHourProjectsNothing() {
+        let reset = now.addingTimeInterval(3600)
+        let samples = (0..<5).map {
+            sample(minutesAgo: Double(12 - $0 * 3), fiveHour: 40.0, fiveHourReset: reset)
+        }
+        XCTAssertEqual(ForecastEngine.fiveHourProjection(samples: samples, now: now), .none)
+    }
+
+    func testOnPaceFiveHourProjectsLandingPoint() {
+        // 1 point/min from 70%, reset in 15 min: lands near 85% with no wall.
+        let reset = now.addingTimeInterval(15 * 60)
+        let samples = [
+            sample(minutesAgo: 10, fiveHour: 60, fiveHourReset: reset),
+            sample(minutesAgo: 5, fiveHour: 65, fiveHourReset: reset),
+            sample(minutesAgo: 0, fiveHour: 70, fiveHourReset: reset),
+        ]
+        let projection = ForecastEngine.fiveHourProjection(samples: samples, now: now)
+        XCTAssertEqual(try XCTUnwrap(projection.atReset), 85, accuracy: 0.5)
+        XCTAssertNil(projection.wall)
+    }
+
+    func testWallFiveHourProjectsFullBarAndEta() {
+        let reset = now.addingTimeInterval(2 * 3600)
+        let samples = [
+            sample(minutesAgo: 10, fiveHour: 60, fiveHourReset: reset),
+            sample(minutesAgo: 5, fiveHour: 65, fiveHourReset: reset),
+            sample(minutesAgo: 0, fiveHour: 70, fiveHourReset: reset),
+        ]
+        let projection = ForecastEngine.fiveHourProjection(samples: samples, now: now)
+        XCTAssertEqual(projection.atReset, 100)
+        guard case .at(let eta) = projection.wall else { return XCTFail("expected a wall time") }
+        XCTAssertEqual(eta.timeIntervalSince(now), 30 * 60, accuracy: 60)
+    }
+
+    func testWeeklyFinePaceProjectsBelowCap() {
+        // 1 point/day from 22%, reset in 3 days: lands near 25%.
+        let reset = now.addingTimeInterval(3 * 86400)
+        let samples = [
+            sample(minutesAgo: 2 * 24 * 60, fiveHour: nil, weekly: 20, weeklyReset: reset),
+            sample(minutesAgo: 24 * 60, fiveHour: nil, weekly: 21, weeklyReset: reset),
+            sample(minutesAgo: 0, fiveHour: nil, weekly: 22, weeklyReset: reset),
+        ]
+        let projection = ForecastEngine.weeklyProjection(samples: samples, now: now)
+        XCTAssertEqual(try XCTUnwrap(projection.atReset), 25, accuracy: 0.5)
+        XCTAssertNil(projection.wall)
     }
 
     // MARK: - Weekly verdicts
@@ -197,6 +261,21 @@ final class ForecastTests: XCTestCase {
                              "disagreeing paces must widen the band")
         // Burst pace: 6 pts / 3 h = 2/h → 52 remaining ≈ 26 h to the wall.
         XCTAssertEqual(earliest.timeIntervalSince(now), 26 * 3600, accuracy: 2 * 3600)
+    }
+
+    func testWeeklyBurstFarFromTheWallDoesNotWarn() {
+        // 11% after two days, then a busy morning: the burst alone reaches the cap in about
+        // 4.5 days, the sustained pace in 16. Only the sustained pace speaks that far out.
+        let reset = now.addingTimeInterval(5 * 86400)
+        let samples = [
+            sample(minutesAgo: 48 * 60, fiveHour: nil, weekly: 0, weeklyReset: reset),
+            sample(minutesAgo: 6 * 60, fiveHour: nil, weekly: 6, weeklyReset: reset),
+            sample(minutesAgo: 0, fiveHour: nil, weekly: 11, weeklyReset: reset),
+        ]
+        guard case .paceFine = ForecastEngine.weekly(samples: samples, now: now) else {
+            return XCTFail("a far burst must not raise a run-out warning")
+        }
+        XCTAssertNil(ForecastEngine.weeklyProjection(samples: samples, now: now).wall)
     }
 
     func testWeeklySinglePaceGetsUncertaintyStripe() {

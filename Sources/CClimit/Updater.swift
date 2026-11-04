@@ -28,7 +28,10 @@ final class UpdaterViewModel: ObservableObject {
 
     init() {
         controller = SPUStandardUpdaterController(
-            startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            // A bare `swift build` binary has no Info.plist feed: starting Sparkle there only
+            // raises an error alert, which also blocks the debug renders.
+            startingUpdater: Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil,
+            updaterDelegate: nil, userDriverDelegate: nil)
         automaticallyChecksForUpdates = controller.updater.automaticallyChecksForUpdates
         controller.updater.publisher(for: \.canCheckForUpdates)
             .assign(to: &$canCheckForUpdates)

@@ -1,421 +1,621 @@
 import AppKit
 import CClimitCore
+import Combine
 import Foundation
-import SwiftUI
 
-/// Connection health, mapped 1:1 from the failure-mode matrix in product.md §5.
-/// Every state renders as something honest — never a stale green.
-enum Health: Equatable {
-    case starting
-    case ok
-    case noCredentials
-    case credentialAccessDenied
-    case unauthorized
-    case forbidden
-    case rateLimited(retryAfter: TimeInterval?)
-    case offline
-    case schemaChanged
-
-    var isError: Bool { self != .ok && self != .starting }
-
-    var message: String? {
-        switch self {
-        case .starting, .ok:
-            return nil
-        case .noCredentials:
-            return "No Claude Code credentials found. Install Claude Code and run `claude` once to log in."
-        case .credentialAccessDenied:
-            return "Keychain access was denied. cclimit only reads the token Claude Code already stores — re-grant access, or log in via `claude` to create ~/.claude/.credentials.json."
-        case .unauthorized:
-            return "Token expired. Use `claude` once to refresh it — cclimit picks it up automatically."
-        case .forbidden:
-            return "This token can't read usage (missing user:profile scope). Log in with `claude`, not `claude setup-token`."
-        case .rateLimited(let retryAfter):
-            if let retryAfter {
-                let minutes = max(1, Int((retryAfter / 60).rounded(.up)))
-                return "Rate limited by the usage API — retrying in ~\(minutes) min."
-            }
-            return "Rate limited by the usage API — backing off."
-        case .offline:
-            return "Network unreachable."
-        case .schemaChanged:
-            return "The usage API changed shape — check for a cclimit update."
-        }
-    }
-}
-
+/// Owns one `AccountMonitor` per Claude Code login on this Mac, and the popover's account
+/// selection. With one visible account it is a thin pass-through to that monitor. With
+/// several, "All" pools them and the menu bar follows whatever the popover shows.
 @MainActor
 final class AppState: ObservableObject {
-    @Published var snapshot: UsageSnapshot?
-    @Published var lastUpdated: Date?
-    @Published var health: Health = .starting
-    @Published var fiveHourVerdict: FiveHourVerdict = .noData
-    /// Forecast for every weekly window: overall ("Weekly cap") first, then each model
-    /// (e.g. Fable). Highest-utilization first so the binding one leads.
-    @Published var weeklyForecasts: [WeeklyForecast] = []
-    @Published var burns: [ProjectBurn] = []
-    @Published var burnsUpdated: Date?
-    /// When the per-model (e.g. Fable) data was last fetched fresh from the usage endpoint.
-    /// May lag `lastUpdated` (the always-fresh probe) when that endpoint is rate limited.
-    @Published var perModelUpdated: Date?
+    static let allID = "all"
 
-    struct WeeklyForecast: Identifiable, Equatable {
-        let name: String        // "Weekly cap" or a model name
-        let utilization: Double?
-        let verdict: WeeklyVerdict
-        var id: String { name }
+    /// Every discovered login, hidden ones included (Settings lists them all).
+    @Published private(set) var monitors: [AccountMonitor] = []
+    /// "all" or an account id. The menu bar icon follows it.
+    @Published var selection: String {
+        didSet { defaults.set(selection, forKey: "accountSelection") }
     }
+    /// User overrides: display names and show/hide, keyed by account id.
+    @Published private var customNames: [String: String]
+    @Published private var visibilityOverrides: [String: Bool]
+    /// Accounts another login pushed out of their config dir. Settings lists them.
+    @Published private(set) var replacedLogins: [ReplacedLogin]
+    /// The login the Add Account sheet waits for.
+    @Published private(set) var pendingLogin: PendingLogin?
+    /// A CLIProxyAPI server this Mac's Claude Code sends traffic to, found in its settings.
+    /// The popover offers to connect it while cclimit is not connected to a proxy.
+    @Published private(set) var detectedProxy: URL?
+    /// Config dirs whose Claude Code goes through a proxy and that no login here owns. The
+    /// proxy picks the login for each request, so their transcripts belong to no single
+    /// account: they form one pool, shown once.
+    @Published private(set) var proxyRoots: [URL] = []
+    let proxyTranscripts = TranscriptReports(index: TranscriptIndex(roots: [], storeURL: nil))
 
-    /// Previous 5h utilization, to detect a rise between polls and switch to active cadence.
-    private var lastFiveHourUtil: Double?
-
-    let sampleStore = SampleStore()
-    /// UA tracks the Claude Code actually installed here; the pinned default is only a fallback.
-    private static let ua = ClaudeCodeVersion.detect() ?? UsageClient.defaultUserAgentVersion
-    /// PRIMARY source: 5h + weekly utilization from the unified rate-limit headers on a
-    /// /v1/messages probe — the mechanism Claude Code uses. Rides the generous message limit
-    /// instead of /api/oauth/usage's tiny per-account bucket, so it polls without penalties.
-    private let probe = RateLimitProbe(userAgentVersion: AppState.ua)
-    /// SUPPLEMENT: the usage endpoint, called rarely, only for the per-model (e.g. Fable)
-    /// weekly breakdown the headers don't carry. Non-fatal — a 429 here just leaves per-model
-    /// data stale; the header-driven 5h/weekly gauge keeps working.
-    private let client = UsageClient(userAgentVersion: AppState.ua)
-    /// Spacing between usage-endpoint supplement calls on success (respects its scarce budget).
-    /// On a 429 we wait the server's Retry-After instead; on other errors, idle pace.
-    private let perModelRefreshInterval: TimeInterval = 15 * 60
-    private let perModelStore = PerModelStore()
-    private var lastPerModelSnapshot: UsageSnapshot?
-    /// When the next supplement fetch is allowed. Driven by the outcome of the last one:
-    /// success → +interval, 429 → escalating backoff, other error → +idle. nil means fetch now.
-    private var perModelNextFetch: Date?
-    /// Consecutive 429s from the usage endpoint — drives the escalating backoff, since each
-    /// contact re-triggers its penalty and retrying at a fixed cadence never lets it recover.
-    private var perModelConsecutive429 = 0
-    private let credentials = ChainedCredentialSource()
-    /// In-memory only (product.md §5). Reads go through `/usr/bin/security`, which the item's
-    /// ACL always trusts, so they never prompt. Caching still saves a subprocess per poll:
-    /// re-read only on expiry or 401.
-    private var cachedCredentials: OAuthCredentials?
-    private let notifier = Notifier()
-
-    private var pollState = PollState()
-    private var pollTask: Task<Void, Never>?
-    private var wakeSignal: CheckedContinuation<Void, Never>?
+    /// Last seen account behind each Keychain item, to notice a `/login` that replaced it.
+    private var knownIdentities: [String: AccountIdentity]
+    /// Config dirs cclimit created. Discovery scans them whatever their name.
+    private var accountFolders: [String]
+    /// The user's account order, by id. Accounts not in it follow in discovery order.
+    private var accountOrder: [String]
+    private var pendingTask: Task<Void, Never>?
+    /// Bumped by each Add Account start and cancel, so a cancelled start stays cancelled.
+    private var addGeneration = 0
 
     private let defaults = UserDefaults.standard
+    private var forwarding: [String: AnyCancellable] = [:]
+    private var proxyTranscriptsChanged: AnyCancellable?
+    private var started = false
+    private var lastDiscovery: Date?
+    /// Discoveries overlap (timer, popover open, Look Again, Add Account). Only the newest
+    /// applies, so a slow one that started before a removal cannot bring the account back.
+    private var discoveryGeneration = 0
+    private var discoveryTimer: Timer?
+    private var statsTimer: Timer?
+    private var screenLocked = false
+    /// Debug renders: fixed demo accounts, no discovery or polling.
+    private var isDemo = false
 
     init() {
-        // Hydrate per-model data from the last run so Fable et al. show immediately (stale,
-        // clearly stamped) instead of blank while the usage endpoint is rate limited.
-        if let cached = perModelStore.load() {
-            lastPerModelSnapshot = cached.snapshot
-            perModelUpdated = cached.ts
+        selection = defaults.string(forKey: "accountSelection") ?? Self.allID
+        customNames = defaults.dictionary(forKey: "accountNames") as? [String: String] ?? [:]
+        visibilityOverrides = defaults.dictionary(forKey: "accountVisibility") as? [String: Bool] ?? [:]
+        replacedLogins = Self.decode([ReplacedLogin].self, defaults.data(forKey: "replacedLogins")) ?? []
+        knownIdentities = Self.decode([String: AccountIdentity].self, defaults.data(forKey: "accountIdentities")) ?? [:]
+        accountFolders = defaults.stringArray(forKey: "accountFolders") ?? []
+        accountOrder = defaults.stringArray(forKey: "accountOrder") ?? []
+        proxyTranscriptsChanged = proxyTranscripts.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
     }
 
-    /// Union of per-model window names ever seen (e.g. ["Fable"]), for Settings + layout.
+    private static func decode<T: Decodable>(_ type: T.Type, _ data: Data?) -> T? {
+        data.flatMap { try? JSONDecoder().decode(type, from: $0) }
+    }
+
+    private func persist<T: Encodable>(_ value: T, _ key: String) {
+        if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: key) }
+    }
+
+    // MARK: - Accounts
+
+    var visibleMonitors: [AccountMonitor] { monitors.filter { isVisible($0.account) } }
+
+    var isMultiAccount: Bool { visibleMonitors.count > 1 }
+
+    /// The account the popover (and icon) shows, or nil for the pooled "All" view.
+    var selectedMonitor: AccountMonitor? {
+        let visible = visibleMonitors
+        guard visible.count > 1 else { return visible.first }
+        return visible.first { $0.id == selection }
+    }
+
+    var showsPool: Bool { isMultiAccount && selectedMonitor == nil }
+
+    func isVisible(_ account: ClaudeAccount) -> Bool {
+        if let override = visibilityOverrides[account.id] { return override }
+        // A dormant login hides by default, but only while another login is live: an app
+        // with every account hidden shows nothing and explains nothing.
+        return !account.isDormant()
+            || !monitors.contains { $0.account.id != account.id && !$0.account.isDormant() }
+    }
+
+    func setVisible(_ visible: Bool, for account: ClaudeAccount) {
+        visibilityOverrides[account.id] = visible
+        defaults.set(visibilityOverrides, forKey: "accountVisibility")
+        syncRunning()
+        syncLabels()
+    }
+
+    func name(for account: ClaudeAccount) -> String {
+        if let custom = customNames[account.id]?.trimmingCharacters(in: .whitespaces), !custom.isEmpty {
+            return custom
+        }
+        return account.suggestedName
+    }
+
+    /// The name for tight places (the segmented switcher). An email reads as its domain,
+    /// "mailnail" for matyas@mailnail.com, or as its local part at a common mail provider.
+    func shortName(for account: ClaudeAccount) -> String {
+        let name = name(for: account)
+        let parts = name.split(separator: "@")
+        guard parts.count == 2 else { return name }
+        let domain = parts[1].split(separator: ".").first.map(String.init) ?? ""
+        let common: Set<String> = ["gmail", "googlemail", "icloud", "me", "outlook", "hotmail", "live",
+                                   "yahoo", "proton", "protonmail", "email", "seznam", "centrum", "gmx", "fastmail"]
+        return common.contains(domain.lowercased()) || domain.isEmpty ? String(parts[0]) : domain
+    }
+
+    /// cclimit made this account's folder with Add Account, so it may also remove it.
+    func createdFolder(for account: ClaudeAccount) -> Bool {
+        guard let dir = account.configDir?.standardizedFileURL.path else { return false }
+        return accountFolders.contains { URL(fileURLWithPath: $0).standardizedFileURL.path == dir }
+    }
+
+    /// Signs the account out through Claude Code's own `auth logout`, which deletes its
+    /// Keychain item, then forgets it. A folder cclimit created goes to the Trash. The default
+    /// login is never removed here: it is the one plain `claude` uses.
+    func remove(_ account: ClaudeAccount) async -> String? {
+        if account.isDefault { return "cclimit can only hide the default login." }
+        if account.isProxyOnly {
+            return "This login lives on the CLI proxy. Remove it there, or hide it here."
+        }
+        guard let dir = account.configDir else {
+            return "cclimit does not know this login's folder. Run `claude auth logout` with its CLAUDE_CONFIG_DIR, or hide it here."
+        }
+        enum Outcome { case done, notFound, failed, timedOut }
+        let outcome = await Task.detached(priority: .userInitiated) { () -> Outcome in
+            guard let claude = ClaudeCodeCLI.locate() else { return .notFound }
+            guard let result = try? ChildProcess.run(
+                claude, arguments: ["auth", "logout"],
+                environment: ClaudeCodeUsageSource.environment(configDir: dir), timeout: 30)
+            else { return .failed }
+            if result.timedOut { return .timedOut }
+            return result.status == 0 ? .done : .failed
+        }.value
+        let manual = "`CLAUDE_CONFIG_DIR=\(dir.path) claude auth logout`"
+        switch outcome {
+        case .done: break
+        case .notFound: return "cclimit cannot find the claude command to sign out."
+        case .timedOut: return "Claude Code did not finish signing out in 30 seconds. Try \(manual)."
+        case .failed: return "Claude Code could not sign this account out. Try \(manual)."
+        }
+
+        if createdFolder(for: account) {
+            let trashed = await Task.detached(priority: .userInitiated) {
+                (try? FileManager.default.trashItem(at: dir, resultingItemURL: nil)) != nil
+            }.value
+            if !trashed { Log.poll.error("accounts: could not move \(dir.path, privacy: .public) to the Trash") }
+            accountFolders.removeAll { URL(fileURLWithPath: $0).standardizedFileURL.path == dir.standardizedFileURL.path }
+            defaults.set(accountFolders, forKey: "accountFolders")
+        }
+        customNames[account.id] = nil
+        defaults.set(customNames, forKey: "accountNames")
+        visibilityOverrides[account.id] = nil
+        defaults.set(visibilityOverrides, forKey: "accountVisibility")
+        knownIdentities[account.id] = nil
+        persist(knownIdentities, "accountIdentities")
+        // Drop it here, not through discovery: with no other login left, discovery finds
+        // nothing and keeps the known monitors, this one included.
+        monitors.first { $0.id == account.id }?.discardHistory()
+        monitors.removeAll { $0.id == account.id }
+        forwarding[account.id] = nil
+        if selection == account.id { selection = Self.allID }
+        await discoverAndApply()
+        return nil
+    }
+
+    /// Settings > Accounts drag: the switcher and the All list follow this order.
+    func moveAccounts(fromOffsets source: IndexSet, toOffset destination: Int) {
+        var next = monitors
+        next.move(fromOffsets: source, toOffset: destination)
+        accountOrder = next.map(\.id)
+        defaults.set(accountOrder, forKey: "accountOrder")
+        monitors = next
+    }
+
+    /// Discovery order, then the user's order on top: known ids by their stored rank,
+    /// new ones after them.
+    private func ordered(_ monitors: [AccountMonitor]) -> [AccountMonitor] {
+        let rank = Dictionary(accountOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        return monitors.enumerated()
+            .sorted { (rank[$0.element.id] ?? Int.max, $0.offset) < (rank[$1.element.id] ?? Int.max, $1.offset) }
+            .map(\.element)
+    }
+
+    func rename(_ account: ClaudeAccount, to name: String) {
+        // Trimmed when read, not here: trimming per keystroke eats the space between words.
+        customNames[account.id] = name.trimmingCharacters(in: .whitespaces).isEmpty ? nil : name
+        defaults.set(customNames, forKey: "accountNames")
+        syncLabels()
+    }
+
+    // MARK: - What the menu bar and Settings read
+
+    var snapshot: UsageSnapshot? { showsPool ? pooledSnapshot : selectedMonitor?.snapshot }
+
+    var health: Health {
+        guard showsPool else { return selectedMonitor?.health ?? .starting }
+        let healths = visibleMonitors.map(\.health)
+        if healths.contains(.ok) { return .ok }
+        if healths.allSatisfy({ $0 == .starting }) { return .starting }
+        return healths.first { $0.isError } ?? .starting
+    }
+
+    var lastUpdated: Date? {
+        showsPool ? visibleMonitors.compactMap(\.lastUpdated).max() : selectedMonitor?.lastUpdated
+    }
+
+    /// Capacity-weighted across the visible accounts that have a reading.
+    var pooledSnapshot: UsageSnapshot? {
+        AccountPool.combine(visibleMonitors.compactMap { monitor in
+            monitor.snapshot.map { AccountPool.Member(snapshot: $0, weight: monitor.account.plan.weight) }
+        })
+    }
+
+    /// Union of per-model window names ever seen, across accounts.
     var seenModelNames: [String] { defaults.stringArray(forKey: "seenModels") ?? [] }
 
-    /// A note when per-model data is older than a refresh cycle (the usage endpoint has been
-    /// unavailable), so the rows read as "last known", not current. Nil while fresh.
-    func perModelStaleNote(now: Date = Date()) -> String? {
-        guard let updated = perModelUpdated else { return nil }
-        guard now.timeIntervalSince(updated) > perModelRefreshInterval + 120 else { return nil }
-        return "updated \(Format.staleness(since: updated, now: now))"
-    }
-
-    var policy: PollPolicy {
-        PollPolicy(
-            activeInterval: TimeInterval(defaults.object(forKey: "pollActiveSeconds") as? Int ?? 60),
-            idleInterval: TimeInterval(defaults.object(forKey: "pollIdleSeconds") as? Int ?? 300)
-        )
-    }
+    // MARK: - Lifecycle
 
     func start() {
+        guard !started else { return }
+        started = true
         observeScreenLock()
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                await self.pollOnce()
-                let decision = nextPoll(policy: self.policy, state: self.pollState)
-                switch decision {
-                case .paused:
-                    Log.poll.debug("paused (screen locked) — waiting for unlock")
-                    await self.waitForWake()
-                case .poll(let interval):
-                    let reason = self.pollState.consecutiveRateLimits > 0
-                        ? "rate-limit backoff (429 ×\(self.pollState.consecutiveRateLimits))"
-                        : (self.pollState.consecutiveFailures > 0 ? "after failure" : "normal")
-                    Log.poll.notice(
-                        "next poll in \(Int(interval), privacy: .public)s · \(reason, privacy: .public)")
-                    await self.sleepInterruptibly(interval)
-                }
+        rediscover()
+        // New logins appear without a relaunch. Discovery is a few `security` calls.
+        discoveryTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.rediscover() }
+        }
+        // Keep the project stats warm, so the popover opens on finished numbers and does not
+        // grow once a scan lands. A warm index update takes about half a second, off main.
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.screenLocked else { return }
+                self.refreshAttributionIfStale()
             }
         }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(20))
+            refreshAttributionIfStale()
+        }
+    }
+
+    /// Settings > General > Usage source is "Claude Code": no Keychain secret is read.
+    var readsThroughClaudeCode: Bool { defaults.string(forKey: "usageSource") == "claudeCode" }
+
+    /// The usage source changed: find accounts the new way and take a reading at once.
+    func usageSourceChanged() {
+        objectWillChange.send()
+        rediscover()
+        visibleMonitors.forEach { $0.refreshNow() }
+    }
+
+    /// The CLI proxy was connected or disconnected: find its logins and read them at once.
+    func proxyChanged() {
+        objectWillChange.send()
+        rediscover()
+    }
+
+    /// Re-reads the Keychain for logins, keeps the monitors that still exist (their polling
+    /// state and backoff must survive), adds new ones, and stops the ones that are gone.
+    func rediscover() {
+        lastDiscovery = Date()
+        Task { await discoverAndApply() }
+    }
+
+    @discardableResult
+    private func discoverAndApply() async -> [ClaudeAccount] {
+        guard !isDemo else { return monitors.map(\.account) }
+        let extra = accountFolders.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let readSecrets = !readsThroughClaudeCode
+        discoveryGeneration += 1
+        let generation = discoveryGeneration
+        var found = await Task.detached(priority: .utility) {
+            AccountDiscovery.discover(extraConfigDirs: extra, readSecrets: readSecrets)
+        }.value
+        guard generation == discoveryGeneration else { return found }
+        let localFound = !found.isEmpty
+        if localFound { trackIdentities(found) }
+        let proxy = ProxyHub.shared
+        await proxy.ready()
+        guard generation == discoveryGeneration else { return found }
+        if proxy.isConfigured {
+            // A failed listing keeps the last known logins, so a proxy outage shows as an
+            // error on each account, not as accounts that vanish and come back.
+            let logins = (try? await proxy.logins()) ?? proxy.lastLogins
+            guard generation == discoveryGeneration else { return found }
+            found = ClaudeAccount.merging(local: found, proxy: logins)
+        }
+        if found.isEmpty, monitors.contains(where: { $0.account.email != nil }) {
+            // Nothing readable right now, but logins were here: most likely a locked Keychain
+            // or a stalled `security`. Keep the monitors and their backoff. Their polls report it.
+            Log.poll.notice("accounts: discovery found nothing · keeping \(self.monitors.count, privacy: .public) known")
+            return monitors.map(\.account)
+        }
+        if found.isEmpty {
+            // No readable login. Keep a default monitor so its health explains why.
+            found = [ClaudeAccount(
+                id: ClaudeAccount.defaultID, service: AccountDiscovery.baseService,
+                configDir: nil, email: nil, organization: nil, accountUUID: nil,
+                plan: .unknown, tokenExpiresAt: nil, suggestedName: "Main")]
+        } else if !localFound, let known = monitors.first(where: { !$0.account.isProxyOnly && $0.account.email != nil }) {
+            // Only the proxy answered, while a local login was known: the Keychain is
+            // locked for now. Keep the local monitors next to the proxy accounts.
+            let keep = monitors.map(\.account).filter { !$0.isProxyOnly }
+            Log.poll.notice("accounts: local discovery empty · keeping \(keep.count, privacy: .public) known (first \(known.id, privacy: .public))")
+            found = ClaudeAccount.merging(local: keep.map { var a = $0; a.proxyAuthIndex = nil; return a },
+                                          proxy: proxy.lastLogins)
+        }
+        apply(discovered: found)
+        await refreshProxyRoutes(extra: extra)
+        return found
+    }
+
+    // MARK: - Proxy traffic
+
+    /// Finds the config dirs routed through a proxy, pools the ones no login owns, and
+    /// checks whether a server is CLIProxyAPI. The check is one keyless GET, so it cannot
+    /// trip the proxy's ban on wrong keys.
+    private func refreshProxyRoutes(extra: [URL]) async {
+        let routes = await Task.detached(priority: .utility) {
+            ProxyDetection.routes(extraConfigDirs: extra)
+        }.value
+        let owned = Set(monitors.compactMap { $0.account.configDir?.standardizedFileURL.path })
+        let roots = routes.filter { !owned.contains($0.configDir.path) }.map(\.projectsDir)
+        if roots != proxyRoots {
+            proxyRoots = roots
+            Log.poll.notice("proxy: \(roots.count, privacy: .public) routed config dir(s) pooled")
+            proxyTranscripts.replace(index: TranscriptIndex(
+                roots: roots,
+                storeURL: roots.isEmpty ? nil : TranscriptReports.dataDir.appendingPathComponent("transcripts-proxy.plist")))
+        }
+
+        var found: URL?
+        var seen = Set<URL>()
+        for route in routes where seen.insert(route.baseURL).inserted {
+            if await ProxyDetection.isCLIProxy(baseURL: route.baseURL) {
+                found = route.baseURL
+                break
+            }
+        }
+        if found != detectedProxy {
+            Log.poll.notice("proxy: CLIProxyAPI \(found?.absoluteString ?? "not found", privacy: .public)")
+            detectedProxy = found
+        }
+    }
+
+    /// The pool joins the view that can hold it: "All", the only account, or an account the
+    /// proxy serves. A login that never touches the proxy keeps its own numbers.
+    func showsProxyTranscripts(for monitors: [AccountMonitor]) -> Bool {
+        guard !proxyRoots.isEmpty else { return false }
+        guard isMultiAccount, monitors.count == 1, let only = monitors.first else { return true }
+        return only.account.isProxyOnly || only.account.proxyAuthIndex != nil
+    }
+
+    private static let proxySuggestionKey = "proxySuggestionDismissed"
+
+    /// The proxy to offer in the popover: found, not connected, and not dismissed.
+    var proxySuggestion: URL? {
+        guard let url = detectedProxy, !ProxyHub.shared.isConfigured,
+              defaults.string(forKey: Self.proxySuggestionKey) != url.absoluteString else { return nil }
+        return url
+    }
+
+    func dismissProxySuggestion() {
+        guard let url = detectedProxy else { return }
+        defaults.set(url.absoluteString, forKey: Self.proxySuggestionKey)
+        objectWillChange.send()
+    }
+
+    /// Notices a `/login` that replaced the account behind a Keychain item, and forgets a
+    /// replaced account once it shows up again in a folder of its own.
+    private func trackIdentities(_ found: [ClaudeAccount]) {
+        let result = IdentityTracker.reconcile(
+            known: knownIdentities, replaced: replacedLogins, discovered: found)
+        if result.known != knownIdentities {
+            knownIdentities = result.known
+            persist(knownIdentities, "accountIdentities")
+        }
+        if result.replaced != replacedLogins {
+            for entry in result.replaced where !replacedLogins.contains(entry) {
+                Log.poll.notice("accounts: login \(entry.accountID, privacy: .public) was replaced")
+            }
+            replacedLogins = result.replaced
+            persist(replacedLogins, "replacedLogins")
+        }
+    }
+
+    func dismissReplaced(_ entry: ReplacedLogin) {
+        replacedLogins.removeAll { $0.id == entry.id }
+        persist(replacedLogins, "replacedLogins")
+    }
+
+    // MARK: - Add Account
+
+    /// Makes the folder, remembers it for discovery, adds the optional alias, opens the
+    /// login in Terminal, and then polls until the login shows up (3 s, up to 10 min).
+    func beginAddAccount(name: String, slug: String, folder: URL, aliasShell: AccountSetup.Shell?) async {
+        pendingTask?.cancel()
+        addGeneration += 1
+        let generation = addGeneration
+        var pending = PendingLogin(name: name, folder: folder, phase: .waiting)
+        do {
+            try AddAccountLauncher.createFolder(folder)
+        } catch {
+            pending.phase = .failed("cclimit could not make the folder \(folder.path).")
+            pendingLogin = pending
+            return
+        }
+        if !accountFolders.contains(folder.path) {
+            accountFolders.append(folder.path)
+            defaults.set(accountFolders, forKey: "accountFolders")
+        }
+        if let shell = aliasShell {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            do {
+                if try AccountSetup.installAlias(slug: slug, folder: folder, shell: shell, home: home) == .added {
+                    pending.aliasNote = "Open a new terminal window to use \(AccountSetup.commandName(slug: slug))."
+                }
+            } catch {
+                pending.aliasNote = "cclimit could not write \(shell.rcDisplayPath). Add the alias yourself."
+            }
+        }
+        do {
+            try await AddAccountLauncher.openLoginInTerminal(folder: folder, slug: slug)
+            // Cancel while Terminal opened: no waiting login behind a closed sheet.
+            guard generation == addGeneration else { return }
+        } catch {
+            guard generation == addGeneration else { return }
+            pending.phase = .failed(
+                "Terminal did not open. Run claude auth login with CLAUDE_CONFIG_DIR set to \(folder.path).")
+            pendingLogin = pending
+            return
+        }
+        pendingLogin = pending
+        pendingTask = Task { [weak self] in await self?.waitForLogin(folder: folder, name: name) }
+    }
+
+    func cancelPendingLogin() {
+        addGeneration += 1
+        pendingTask?.cancel()
+        pendingTask = nil
+        pendingLogin = nil
+    }
+
+    /// Clears a finished result. A login still being waited for stays.
+    func clearPendingLogin() {
+        guard pendingLogin?.phase != .waiting else { return }
+        pendingLogin = nil
+    }
+
+    /// Polls `dump-keychain` (names only, no secret) for the folder's item. Once it is
+    /// there, runs a full discovery to name the account and read its email.
+    private func waitForLogin(folder: URL, name: String) async {
+        let services = AccountSetup.expectedServices(forConfigDir: folder)
+        let ids = Set(services.map { String($0.dropFirst(AccountDiscovery.baseService.count + 1)) })
+        let deadline = Date().addingTimeInterval(10 * 60)
+        while Date() < deadline {
+            try? await Task.sleep(for: .seconds(3))
+            if Task.isCancelled { return }
+            let present = await Task.detached(priority: .utility) {
+                !services.isDisjoint(with: AccountDiscovery.services(inKeychainDump: AccountDiscovery.dumpKeychain()))
+            }.value
+            guard present, !Task.isCancelled else { continue }
+            lastDiscovery = Date()
+            let found = await discoverAndApply()
+            if Task.isCancelled { return }
+            if let account = found.first(where: { ids.contains($0.id) }) {
+                rename(account, to: name)
+                setPhase(.added(label: account.email ?? name))
+                return
+            }
+            // The item exists but discovery dropped it: the same account is already tracked.
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            if let uuid = AccountDiscovery.profile(configDir: folder, home: home)?.accountUUID,
+               let existing = monitors.first(where: { $0.account.accountUUID == uuid }) {
+                setPhase(.alreadyTracked(name: self.name(for: existing.account)))
+                return
+            }
+            // Claude Code writes `.claude.json` just after the item. Look again next tick.
+        }
+        if !Task.isCancelled { setPhase(.timedOut) }
+    }
+
+    private func setPhase(_ phase: PendingLogin.Phase) {
+        pendingLogin?.phase = phase
+        pendingTask = nil
+    }
+
+    private func apply(discovered: [ClaudeAccount]) {
+        var next: [AccountMonitor] = []
+        for account in discovered {
+            if let existing = monitors.first(where: { $0.id == account.id }),
+               !Self.isDifferentLogin(existing.account, account) {
+                existing.update(account: account)
+                next.append(existing)
+            } else {
+                if let replaced = monitors.first(where: { $0.id == account.id }) {
+                    // Another account logged in to this folder. Its token, history, forecasts,
+                    // and name belong to the old account: start this one clean.
+                    Log.poll.notice("accounts: \(account.id, privacy: .public) is a new login · starting fresh")
+                    replaced.stop()
+                    replaced.discardHistory()
+                    customNames[account.id] = nil
+                    defaults.set(customNames, forKey: "accountNames")
+                }
+                let monitor = AccountMonitor(account: account)
+                forwarding[account.id] = monitor.objectWillChange.sink { [weak self] _ in
+                    self?.objectWillChange.send()
+                }
+                next.append(monitor)
+            }
+        }
+        for gone in monitors where !next.contains(where: { $0.id == gone.id }) {
+            gone.stop()
+            forwarding[gone.id] = nil
+        }
+        next = ordered(next)
+        let names = next.map(\.id)
+        if names != monitors.map(\.id) {
+            Log.poll.notice("accounts: [\(names.joined(separator: ","), privacy: .public)]")
+        }
+        monitors = next
+        syncRunning()
+        syncLabels()
+    }
+
+    /// Same Keychain item, other account: both account UUIDs are known and differ.
+    private static func isDifferentLogin(_ old: ClaudeAccount, _ new: ClaudeAccount) -> Bool {
+        guard let a = old.accountUUID, let b = new.accountUUID else { return false }
+        return a != b
+    }
+
+    /// Visible accounts poll, hidden ones do not: a hidden login costs nothing.
+    private func syncRunning() {
+        for monitor in monitors {
+            if isVisible(monitor.account) {
+                if !monitor.isRunning {
+                    monitor.setScreenLocked(screenLocked)
+                    monitor.start()
+                }
+            } else if monitor.isRunning {
+                monitor.stop()
+            }
+        }
+    }
+
+    private func syncLabels() {
+        let multi = isMultiAccount
+        for monitor in monitors {
+            monitor.notificationLabel = multi ? name(for: monitor.account) : nil
+        }
+    }
+
+    // MARK: - Refresh
+
+    /// A refresh the user asked for is still running on a shown account.
+    var isRefreshing: Bool {
+        (showsPool ? visibleMonitors : selectedMonitor.map { [$0] } ?? []).contains(where: \.isRefreshing)
     }
 
     func refreshNow() {
-        Log.poll.notice("manual refresh")
-        wake()
+        if let selected = selectedMonitor {
+            selected.refreshNow()
+        } else {
+            visibleMonitors.forEach { $0.refreshNow() }
+        }
     }
 
-    /// Called when the popover opens. Fetches fresh data so the numbers reflect "now", not the
-    /// last background poll — but throttled, so rapid re-opens don't spam the probe, and
-    /// suppressed during an active rate-limit backoff so we never poke a live penalty.
     func refreshOnOpen() {
-        let now = Date()
-        if pollState.consecutiveRateLimits > 0 {
-            Log.poll.debug("popover open · skip refresh (in rate-limit backoff)")
-            return
-        }
-        if let last = lastUpdated, now.timeIntervalSince(last) < 15 {
-            Log.poll.debug("popover open · skip refresh (updated \(Int(now.timeIntervalSince(last)), privacy: .public)s ago)")
-            return
-        }
-        Log.poll.notice("popover open · refreshing")
-        wake()
+        guard !isDemo else { return }
+        visibleMonitors.forEach { $0.refreshOnOpen() }
+        if let last = lastDiscovery, Date().timeIntervalSince(last) < 120 { return }
+        rediscover()
     }
-
-    // MARK: - Poll cycle
-
-    func pollOnce() async {
-        let creds: OAuthCredentials
-        if let cached = cachedCredentials, !cached.isExpired() {
-            creds = cached
-        } else {
-            do {
-                creds = try credentials.load()
-                cachedCredentials = creds
-            } catch CredentialError.accessDenied {
-                health = .credentialAccessDenied
-                pollState.recordFailure()
-                return
-            } catch {
-                health = .noCredentials
-                pollState.recordFailure()
-                return
-            }
-        }
-
-        let now = Date()
-        do {
-            // Primary: header-driven 5h + weekly. This is the poll that must not be starved.
-            let probeSnap = try await probe.fetch(token: creds.accessToken)
-            Log.poll.notice(
-                "probe 200 · 5h=\(probeSnap.fiveHour?.utilization ?? -1, privacy: .public)% weekly=\(probeSnap.sevenDay?.utilization ?? -1, privacy: .public)%")
-            let merged = await mergeWithPerModel(probeSnap, token: creds.accessToken, now: now)
-            apply(snapshot: merged, at: now)
-        } catch let error as UsageError {
-            if case .unauthorized = error {
-                // Token the store gave us is stale — drop it so the next cycle re-reads.
-                cachedCredentials = nil
-            }
-            Log.poll.error("probe failed: \(String(describing: error), privacy: .public)")
-            apply(error: error)
-        } catch {
-            Log.poll.error("probe threw non-UsageError: \(String(describing: error), privacy: .public)")
-            health = .offline
-            pollState.recordFailure()
-        }
-    }
-
-    /// Fold the per-model weekly windows from the usage endpoint into the header snapshot.
-    /// The supplement is fetched at most every `perModelRefreshInterval`; between fetches the
-    /// last successful per-model data is reused. A failure here is swallowed on purpose — the
-    /// header-driven 5h/weekly gauge is what the user relies on, and the usage endpoint's
-    /// budget is too scarce to let its 429s degrade the primary reading.
-    private func mergeWithPerModel(
-        _ probeSnap: UsageSnapshot, token: String, now: Date
-    ) async -> UsageSnapshot {
-        let due = perModelNextFetch.map { now >= $0 } ?? true
-        if due {
-            do {
-                let full = try await client.fetch(token: token)
-                lastPerModelSnapshot = full
-                perModelUpdated = now
-                perModelConsecutive429 = 0
-                perModelStore.save(full, at: now)
-                perModelNextFetch = now.addingTimeInterval(perModelRefreshInterval)
-                Log.poll.notice(
-                    "supplement 200 · models=[\(full.perModelWindows.map(\.name).joined(separator: ","), privacy: .public)]")
-            } catch let error as UsageError {
-                let wait: TimeInterval
-                if case .rateLimited(let retryAfter) = error {
-                    perModelConsecutive429 += 1
-                    // This endpoint RE-TRIGGERS its penalty on any contact — a clean retry after
-                    // the stated window still came back with a fresh 3600s (observed 2026-07-16).
-                    // So honoring Retry-After alone just keeps it hot forever. Escalate hard on
-                    // repeats (15m→30m→1h→2h→4h, cap 6h) to give it real quiet time, with the
-                    // server's Retry-After as a floor.
-                    let escalated = min(
-                        perModelRefreshInterval * pow(2, Double(min(perModelConsecutive429 - 1, 5))),
-                        6 * 3600)
-                    let serverFloor = (retryAfter.map { min($0, PollPolicy.retryAfterCeiling) } ?? 0)
-                        + PollPolicy.retryAfterMargin
-                    wait = max(escalated, serverFloor)
-                    Log.poll.notice(
-                        "supplement 429 (×\(self.perModelConsecutive429, privacy: .public), retry-after=\(retryAfter.map { String(Int($0)) } ?? "none", privacy: .public)s) · backing off \(Int(wait), privacy: .public)s · keeping \(self.lastPerModelSnapshot == nil ? "no" : "cached", privacy: .public) data")
-                } else {
-                    wait = policy.idleInterval
-                    Log.poll.notice(
-                        "supplement \(String(describing: error), privacy: .public) · next in \(Int(wait), privacy: .public)s")
-                }
-                perModelNextFetch = now.addingTimeInterval(wait)
-            } catch {
-                perModelNextFetch = now.addingTimeInterval(policy.idleInterval)
-                Log.poll.notice("supplement failed: \(String(describing: error), privacy: .public)")
-            }
-        }
-        guard let supplement = lastPerModelSnapshot else { return probeSnap }
-        // Header values win for 5h/weekly (always fresh); borrow only per-model + extra usage.
-        return UsageSnapshot(
-            fiveHour: probeSnap.fiveHour ?? supplement.fiveHour,
-            sevenDay: probeSnap.sevenDay ?? supplement.sevenDay,
-            sevenDayOpus: supplement.sevenDayOpus,
-            sevenDaySonnet: supplement.sevenDaySonnet,
-            limits: supplement.limits,
-            extraUsage: supplement.extraUsage)
-    }
-
-    private func apply(snapshot snap: UsageSnapshot, at now: Date) {
-        snapshot = snap
-        lastUpdated = now
-        health = .ok
-        pollState.recordSuccess()
-
-        sampleStore.append(Sample(ts: now, snapshot: snap))
-        rememberModelNames(snap.perModelWindows.map(\.name))
-        recomputeForecasts(now: now)
-
-        // Switch to active (60s) cadence the moment usage moves, not only once the forecast
-        // has already confirmed a burn — otherwise idle 5-min polling never gathers the
-        // closely-spaced samples the forecast needs (a deadlock).
-        let currentFiveHour = snap.fiveHour?.utilization
-        let rising: Bool
-        if let current = currentFiveHour, let previous = lastFiveHourUtil {
-            rising = current > previous + 0.001
-        } else {
-            rising = false
-        }
-        lastFiveHourUtil = currentFiveHour
-        pollState.activelyBurning = rising || {
-            if case .onPace = fiveHourVerdict { return true }
-            if case .willHitWall = fiveHourVerdict { return true }
-            return false
-        }()
-
-        notifier.evaluate(snapshot: snap, fiveHourVerdict: fiveHourVerdict, now: now)
-    }
-
-    private func apply(error: UsageError) {
-        switch error {
-        case .rateLimited(let retryAfter):
-            Log.poll.error(
-                "RATE LIMITED (429) · server Retry-After=\(retryAfter.map { String(Int($0)) } ?? "none", privacy: .public)s · consecutive=\(self.pollState.consecutiveRateLimits + 1, privacy: .public)")
-            health = .rateLimited(retryAfter: retryAfter)
-            pollState.recordRateLimit(retryAfter: retryAfter)
-        case .unauthorized:
-            // Claude Code refreshes the token on use; our next cycle re-reads the store.
-            health = .unauthorized
-            pollState.recordFailure()
-        case .forbidden:
-            health = .forbidden
-            pollState.recordFailure()
-        case .offline:
-            health = .offline
-            pollState.recordFailure()
-        case .schemaChanged:
-            health = .schemaChanged
-            pollState.recordFailure()
-        case .noCredentials:
-            health = .noCredentials
-            pollState.recordFailure()
-        case .credentialAccessDenied:
-            health = .credentialAccessDenied
-            pollState.recordFailure()
-        }
-    }
-
-    /// Persist the union of model names ever seen so Settings can offer a toggle per model,
-    /// even for one not present in the latest poll.
-    private func rememberModelNames(_ names: [String]) {
-        guard !names.isEmpty else { return }
-        var seen = Set(defaults.stringArray(forKey: "seenModels") ?? [])
-        let before = seen.count
-        seen.formUnion(names)
-        if seen.count != before {
-            defaults.set(seen.sorted(), forKey: "seenModels")
-        }
-    }
-
-    private func recomputeForecasts(now: Date) {
-        let samples = sampleStore.load(since: now.addingTimeInterval(-4 * 24 * 3600))
-        fiveHourVerdict = ForecastEngine.fiveHour(samples: samples, now: now)
-
-        // Forecast every weekly window — overall and each per-model — so the one the user
-        // actually burns (e.g. Fable) gets a prediction, not just the aggregate cap.
-        var forecasts: [WeeklyForecast] = [
-            WeeklyForecast(
-                name: "Weekly cap",
-                utilization: snapshot?.sevenDay?.utilization,
-                verdict: ForecastEngine.weekly(samples: samples, now: now))
-        ]
-        for model in snapshot?.perModelWindows ?? [] {
-            forecasts.append(
-                WeeklyForecast(
-                    name: "\(model.name) weekly",
-                    utilization: model.window.utilization,
-                    verdict: ForecastEngine.weeklyForModel(model.name, samples: samples, now: now)))
-        }
-        // Binding (highest utilization) first.
-        weeklyForecasts = forecasts.sorted { ($0.utilization ?? 0) > ($1.utilization ?? 0) }
-    }
-
-    // MARK: - Attribution (computed lazily on popover open, throttled)
 
     func refreshAttributionIfStale() {
-        let now = Date()
-        if let last = burnsUpdated, now.timeIntervalSince(last) < 300 { return }
-        burnsUpdated = now
-        let windowStart = snapshot?.fiveHour?.resetsAt.map { $0.addingTimeInterval(-5 * 3600) }
-            ?? now.addingTimeInterval(-5 * 3600)
-        Task { [weak self] in
-            let result = await Task.detached(priority: .utility) {
-                AttributionEngine.burn(since: windowStart, now: now)
-            }.value
-            self?.burns = result
+        guard !isDemo else { return }
+        let targets = showsPool ? visibleMonitors : selectedMonitor.map { [$0] } ?? []
+        let range = Self.attributionRange(for: targets)
+        targets.forEach { $0.refreshAttributionIfStale(range: range) }
+        if showsProxyTranscripts(for: targets) {
+            proxyTranscripts.refreshIfStale(range: range, span: Self.attributionSpan(range: range, page: 0, for: targets))
         }
     }
 
-    // MARK: - Sleep / wake plumbing
-
-    /// Invalidates timers from earlier sleeps. Without this, a sleep cut short by a manual
-    /// refresh or unlock leaves its timer pending, and that stale timer later wakes the NEXT
-    /// sleep early — polls creep faster than policy, which can hammer through a 429 penalty.
-    private var sleepGeneration = 0
-
-    private func sleepInterruptibly(_ interval: TimeInterval) async {
-        sleepGeneration += 1
-        let generation = sleepGeneration
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            wakeSignal = cont
-            DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
-                guard let self, self.sleepGeneration == generation else { return }
-                self.wake()
-            }
-        }
+    /// The range the popover shows for these accounts. One rule for the popover and the
+    /// background refresh, so the refresh warms the page the popover opens on.
+    static func attributionRange(for monitors: [AccountMonitor]) -> AttributionRange {
+        AttributionRange.shown(
+            stored: UserDefaults.standard.string(forKey: "attributionRange"),
+            hasFiveHour: monitors.contains { $0.snapshot.map { !$0.lacksFiveHour } ?? true })
     }
 
-    private func waitForWake() async {
-        sleepGeneration += 1  // orphan any timer from the sleep this pause replaced
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            wakeSignal = cont
-        }
-    }
-
-    private func wake() {
-        wakeSignal?.resume()
-        wakeSignal = nil
+    /// A page's span: the first account's, so its 5-hour window sets the start.
+    static func attributionSpan(range: AttributionRange, page: Int, for monitors: [AccountMonitor]) -> DateInterval {
+        monitors.first?.interval(range: range, page: page)
+            ?? range.interval(page: page, now: Date(), fiveHourReset: nil, weeklyReset: nil)
     }
 
     private func observeScreenLock() {
@@ -423,15 +623,105 @@ final class AppState: ObservableObject {
         center.addObserver(
             forName: Notification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.pollState.screenLocked = true }
+            Task { @MainActor in self?.setScreenLocked(true) }
         }
         center.addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                self?.pollState.screenLocked = false
-                self?.wake()
-            }
+            Task { @MainActor in self?.setScreenLocked(false) }
         }
     }
+
+    private func setScreenLocked(_ locked: Bool) {
+        screenLocked = locked
+        monitors.forEach { $0.setScreenLocked(locked) }
+    }
 }
+
+#if DEBUG
+extension AppState {
+    /// Debug: fixed demo accounts, no polling. Lets the multi-account UI be rendered and
+    /// checked on a Mac with only one login (`CCLIMIT_RENDER_POPOVER=/dir`).
+    func installDemoAccounts() {
+        isDemo = true
+        let now = Date()
+        func account(_ id: String, _ name: String, _ email: String, _ plan: PlanTier) -> ClaudeAccount {
+            ClaudeAccount(
+                id: id, service: AccountDiscovery.baseService + "-" + id, configDir: nil, email: email,
+                organization: nil, accountUUID: id, plan: plan, tokenExpiresAt: nil, suggestedName: name)
+        }
+        /// `five: nil` is an account without a 5-hour limit (Ultra since 2026-10-31).
+        func snap(_ five: Double?, _ week: Double, fable: Double?) -> UsageSnapshot {
+            UsageSnapshot(
+                fiveHour: five.map { UsageWindow(utilization: $0, resetsAt: now.addingTimeInterval(5_400)) },
+                sevenDay: UsageWindow(utilization: week, resetsAt: now.addingTimeInterval(3 * 86_400)),
+                limits: fable.map {
+                    [Limit(kind: "weekly_scoped", group: "weekly", percent: $0,
+                           resetsAt: now.addingTimeInterval(3 * 86_400), isActive: true, severity: nil,
+                           scope: .init(model: .init(displayName: "Fable")))]
+                })
+        }
+        let demo: [(ClaudeAccount, UsageSnapshot?, Health)] = [
+            (account("aaaaaaaa", "Work", "matyas@acme.com", .max20x), snap(nil, 44, fable: 78), .ok),
+            (account("bbbbbbbb", "Personal", "matyas@mailnail.com", .max5x), snap(12, 38, fable: nil), .ok),
+            (account("cccccccc", "Client", "dev@client.io", .pro), snap(93, 71, fable: nil),
+             .rateLimited(retryAfter: 600)),
+        ]
+        replacedLogins = [ReplacedLogin(
+            accountID: ClaudeAccount.defaultID, accountUUID: "old", email: "matyas@mailnail.com",
+            planLabel: "Max 5x", configDirPath: nil, replacedAt: now.addingTimeInterval(-86_400))]
+        monitors = demo.map { account, snapshot, health in
+            let monitor = AccountMonitor(account: account)
+            monitor.snapshot = snapshot
+            monitor.health = health
+            monitor.lastUpdated = now.addingTimeInterval(-20)
+            switch account.id {
+            case "aaaaaaaa":
+                monitor.projections = [
+                    SectionLayout.weekly: Projection(atReset: 63, wall: nil),
+                    SectionLayout.modelID("Fable"): Projection(
+                        atReset: 100,
+                        wall: .between(now.addingTimeInterval(30 * 3600), now.addingTimeInterval(40 * 3600))),
+                ]
+                let since = Calendar.current.startOfDay(for: now)
+                let hours = Int(now.timeIntervalSince(since) / 3600) + 1
+                let names = ["cclimit", "mailnail", "t3code", "dotfiles"]
+                monitor.setDemoReport(UsageReport(
+                    since: since, bucketSize: 3600,
+                    projects: [
+                        ProjectStats(name: "cclimit", tokens: 4_200_000, share: 0.52, input: 900_000,
+                                     output: 410_000, cacheWrite: 2_890_000, sessions: 6,
+                                     subagentTokens: 760_000,
+                                     models: [.init(name: "Opus 5.5", tokens: 3_100_000),
+                                              .init(name: "Haiku 4.5", tokens: 1_100_000)],
+                                     lastActive: now.addingTimeInterval(-300)),
+                        ProjectStats(name: "mailnail", tokens: 2_100_000, share: 0.26, sessions: 3,
+                                     models: [.init(name: "Fable 5.1", tokens: 2_100_000)],
+                                     lastActive: now.addingTimeInterval(-7200)),
+                        ProjectStats(name: "t3code", tokens: 1_200_000, share: 0.15, sessions: 2),
+                        ProjectStats(name: "dotfiles", tokens: 560_000, share: 0.07, sessions: 1),
+                    ],
+                    buckets: (0..<hours).map { h in
+                        let wave = [0, 0, 0, 0, 0, 0, 0, 0, 2, 5, 7, 4, 1, 3, 8, 9, 6, 2, 1, 0, 0, 0, 0, 0]
+                        let base = wave[h % 24] * 120_000
+                        let split = Dictionary(uniqueKeysWithValues: names.enumerated().map { i, n in
+                            (n, base / (i + 2))
+                        })
+                        return ActivityBucket(
+                            start: since.addingTimeInterval(Double(h) * 3600),
+                            tokens: split.values.reduce(0, +), byProject: split)
+                    }), range: .today)
+            case "bbbbbbbb":
+                monitor.projections = [SectionLayout.fiveHour: Projection(atReset: 31, wall: nil)]
+            default:
+                break
+            }
+            return monitor
+        }
+    }
+
+    func setDemoPendingLogin(_ pending: PendingLogin?) {
+        pendingLogin = pending
+    }
+}
+#endif
