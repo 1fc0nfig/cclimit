@@ -60,6 +60,9 @@ public enum ForecastEngine {
     }
     static let minBurnSamples = 3
     static let minBurnRise: Double = 1.0
+    /// Readings come in whole percents. Right after a reset, one step from 1% to 2% in
+    /// 30 seconds reads as a pace that hits the cap. A burn needs this much time behind it.
+    static let minBurnSpan: TimeInterval = 10 * 60
     static let exhaustedAt: Double = 99.5
 
     // Weekly tuning: sustained pace over up to 3 days, recent pace over the last 6 h.
@@ -104,7 +107,7 @@ public enum ForecastEngine {
             let first = recent.first, let firstUtil = first.fiveHourUtil,
             let last = recent.last, let lastUtil = last.fiveHourUtil,
             lastUtil - firstUtil >= minBurnRise,
-            last.ts > first.ts
+            last.ts.timeIntervalSince(first.ts) >= minBurnSpan
         else { return nil }
         return (lastUtil - firstUtil) / last.ts.timeIntervalSince(first.ts)
     }

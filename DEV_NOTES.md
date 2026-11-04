@@ -37,3 +37,5 @@ Append-only log of decisions and why. Newest last. The full design notes live in
 - **Known, not fixed.** The transcript index removes duplicate responses per file, not across
   files. Measured on 31 days: 0.36% of responses in ~/.claude, 1.01% in the proxy folder. A fix
   needs an index-wide key set (about 150k keys). Not worth it for a 1% overcount.
+- **Fixed (found while checking the release build).** A burn now needs 10 minutes of samples.
+  Readings come in whole percents, so 1% → 2% in 30 s after a reset drew a full red forecast.

@@ -17,6 +17,19 @@ final class ForecastTests: XCTestCase {
 
     // MARK: - 5h verdicts
 
+    /// Seen live on 2026-11-04: right after a reset, 1% → 2% within 30 s drew a full red bar.
+    func testOneStepRightAfterResetIsNotABurn() {
+        let reset = now.addingTimeInterval(5 * 3600 - 180)
+        let samples = [
+            sample(minutesAgo: 70, fiveHour: 99, fiveHourReset: now.addingTimeInterval(-180)),
+            sample(minutesAgo: 1, fiveHour: 1, fiveHourReset: reset),
+            sample(minutesAgo: 0.75, fiveHour: 1, fiveHourReset: reset),
+            sample(minutesAgo: 0.5, fiveHour: 2, fiveHourReset: reset),
+        ]
+        XCTAssertEqual(ForecastEngine.fiveHour(samples: samples, now: now), .idle(utilization: 2, resetsAt: reset))
+        XCTAssertEqual(ForecastEngine.fiveHourProjection(samples: samples, now: now), .none)
+    }
+
     func testNoSamplesMeansNoData() {
         XCTAssertEqual(ForecastEngine.fiveHour(samples: [], now: now), .noData)
     }
