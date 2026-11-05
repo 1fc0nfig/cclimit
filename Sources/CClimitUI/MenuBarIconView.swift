@@ -32,19 +32,15 @@ public struct MenuBarIconView: View {
 
         case .text(let text, let value):
             if let text {
-                Text(text)
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(numberColor(value))
+                // An image, not a Text: MenuBarExtra redraws a Text label in its own font
+                // and as a template, so it came out too big and never took a color.
+                Image(nsImage: IconRenderer.text(
+                    text, value: value, template: template, degraded: degraded))
             } else {
                 // No reading yet — fall back to a neutral dot.
                 Image(nsImage: IconRenderer.single(
                     style: .dot, value: nil, template: template, degraded: degraded))
             }
         }
-    }
-
-    private func numberColor(_ value: Double?) -> Color {
-        guard !template, !degraded, let value else { return .primary }
-        return UsageColor.number(value)
     }
 }

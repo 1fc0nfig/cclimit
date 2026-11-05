@@ -110,6 +110,32 @@ public enum IconRenderer {
         return image
     }
 
+    /// The text styles ("66%", "66% · 1h13m") as one image, so the menu bar keeps our size
+    /// and color. With no bar beside it, the number carries the full green/amber/red state.
+    public static func text(_ text: String, value: Double?, template: Bool, degraded: Bool) -> NSImage {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        let color: NSColor = if template || degraded {
+            .black
+        } else if let value {
+            UsageColor.menuTextNSColor(value)
+        } else {
+            .labelColor
+        }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let textSize = text.size(withAttributes: attrs)
+        // Crop to the glyph ink, not the advance width: the status item adds its own
+        // margins, and the glyph side bearings plus rounding read as extra padding.
+        let ink = CTLineGetImageBounds(
+            CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs)), nil)
+        let height: CGFloat = 16
+        let image = NSImage(size: NSSize(width: ceil(ink.width), height: height), flipped: false) { _ in
+            text.draw(at: NSPoint(x: -ink.minX, y: (height - textSize.height) / 2), withAttributes: attrs)
+            return true
+        }
+        image.isTemplate = template || degraded
+        return image
+    }
+
     /// The single-value image styles (singleBar / gauge / ring / dot). Any other style
     /// falls back to a dot — used e.g. by text styles before the first reading.
     public static func single(style: IconStyle, value: Double?, template: Bool, degraded: Bool) -> NSImage {

@@ -254,18 +254,46 @@ private struct MenuBarLabel: View {
 
     private var degraded: Bool { state.health.isError && state.snapshot == nil }
 
+    private var descriptor: IconDescriptor {
+        IconResolver.resolve(
+            style: style,
+            source: source,
+            composition: BarComposition.parse(barCompositionRaw),
+            thirdModelBar: dualBarsThirdModel,
+            snapshot: state.snapshot,
+            seenModels: state.seenModelNames,
+            now: now)
+    }
+
     var body: some View {
-        MenuBarIconView(
-            descriptor: IconResolver.resolve(
-                style: style,
-                source: source,
-                composition: BarComposition.parse(barCompositionRaw),
-                thirdModelBar: dualBarsThirdModel,
-                snapshot: state.snapshot,
-                seenModels: state.seenModelNames,
-                now: now),
-            template: template,
-            degraded: degraded)
-        .onReceive(minuteTick) { now = $0 }
+        MenuBarIconView(descriptor: descriptor, template: template, degraded: degraded)
+            .onReceive(minuteTick) { now = $0 }
+            // The button gets the new image after this render, so fit on the next turn.
+            .onAppear { DispatchQueue.main.async { StatusItemFit.apply() } }
+            .onChange(of: descriptor) { DispatchQueue.main.async { StatusItemFit.apply() } }
+            .onChange(of: degraded) { DispatchQueue.main.async { StatusItemFit.apply() } }
+    }
+}
+
+/// MenuBarExtra gives its status item a variable length, and AppKit pads that by 8 pt on each
+/// side of the icon. Next to native items that read as loose, so the item gets a fixed length:
+/// the icon width plus a tighter margin.
+///
+/// MenuBarExtra exposes no NSStatusItem, so this reads it from the status bar window by key.
+/// If a macOS update removes that key, the item keeps the system padding and nothing breaks.
+@MainActor
+enum StatusItemFit {
+    static let margin: CGFloat = 4
+
+    static func apply() {
+        let key = "statusItem"
+        for window in NSApp.windows
+        where String(describing: type(of: window)) == "NSStatusBarWindow"
+            && window.responds(to: NSSelectorFromString(key)) {
+            guard let item = window.value(forKey: key) as? NSStatusItem,
+                  let image = item.button?.image else { continue }
+            let length = ceil(image.size.width) + margin * 2
+            if item.length != length { item.length = length }
+        }
     }
 }

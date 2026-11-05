@@ -43,3 +43,17 @@ Append-only log of decisions and why. Newest last. The full design notes live in
   point (64 → 63) with the same reset time, and any drop over 0.5 read as a rollover, so three
   days of history were cut to minutes. A drop under 3 points now counts only when the reset time
   moved later.
+
+## 2026-11-05: menu bar percent drawn as an image
+
+- **Fixed.** The Percent styles rendered as a SwiftUI `Text` label. MenuBarExtra redraws a
+  `Text` in its own font and as a template, so the number was too big and never colored. It is
+  now one `NSImage` at 11 pt, like the other styles.
+- **Decision: green at rest for the text styles.** The number is the only thing in the icon, so
+  it carries the full green/amber/red state like a bar. The popover and inline-bar numbers stay
+  ink below 70%, because a bar sits beside them.
+- **Decision: tighter status item, every icon style.** MenuBarExtra gives the item a variable
+  length, and AppKit pads it by 8 pt per side. It now gets a fixed length of the icon width plus
+  4 pt per side. MenuBarExtra hides its NSStatusItem, so `StatusItemFit` reads it from the
+  status bar window by key and does nothing if the key goes away. The Percent icon went from
+  42 pt to 34 pt. Undo: remove `StatusItemFit` and its calls in `CClimitApp.swift`.

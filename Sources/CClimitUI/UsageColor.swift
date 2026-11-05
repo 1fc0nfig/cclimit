@@ -34,6 +34,18 @@ public enum UsageColor {
         }
     }
 
+    /// The menu bar text styles show only a number, so it carries the whole state like a
+    /// bar does: green at rest too, in a shade that stays legible on light and dark bars.
+    public static func menuTextNSColor(_ utilization: Double) -> NSColor {
+        utilization < 70 ? okGreen : numberNSColor(utilization)
+    }
+
+    private static let okGreen = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .vibrantDark]) == nil
+            ? NSColor(calibratedRed: 0.10, green: 0.52, blue: 0.22, alpha: 1)
+            : NSColor(calibratedRed: 0.35, green: 0.85, blue: 0.45, alpha: 1)
+    }
+
     /// Legible on both light and dark popover materials, unlike the vivid system variants.
     private static let warnAmber = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .vibrantDark]) == nil
