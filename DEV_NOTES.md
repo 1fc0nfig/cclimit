@@ -57,3 +57,12 @@ Append-only log of decisions and why. Newest last. The full design notes live in
   4 pt per side. MenuBarExtra hides its NSStatusItem, so `StatusItemFit` reads it from the
   status bar window by key and does nothing if the key goes away. The Percent icon went from
   42 pt to 34 pt. Undo: remove `StatusItemFit` and its calls in `CClimitApp.swift`.
+
+## 2026-11-06: plain footer buttons, release signing check
+
+- **Fixed.** On macOS 27 the round Liquid Glass footer buttons drew heavy rims, and the glyphs
+  crowded the circles. The footer now has plain monochrome icons with a quiet circle on hover
+  and press, on every macOS version. Undo: restore `.buttonStyle(.glass)` in `FooterButton`.
+- **Found.** The v0.2.2 release went out signed with "Apple Development", not Developer ID,
+  and not notarized (`ALLOW_DEV_SIGN`). Gatekeeper rejects its DMG on other Macs. The Developer
+  ID cert and the notary profile now exist, so the next `scripts/release.sh` signs correctly.

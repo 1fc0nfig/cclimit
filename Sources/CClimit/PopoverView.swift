@@ -134,42 +134,35 @@ struct PopoverView: View {
             }
             Spacer()
             FooterButtons {
-            FooterButton(symbol: "arrow.clockwise", help: state.showsPool ? "Refresh all accounts" : "Refresh now",
-                         busy: state.isRefreshing) {
-                state.refreshNow()
-            }
-            .keyboardShortcut("r")
-            FooterButton(symbol: "gearshape", help: "Settings") {
-                openSettings()
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            .keyboardShortcut(",")
-            FooterButton(symbol: "power", help: "Quit cclimit") {
-                // AppKit refuses to quit while a window shows a sheet. Quit means quit.
-                for window in NSApp.windows {
-                    if let sheet = window.attachedSheet { window.endSheet(sheet) }
+                FooterButton(symbol: "arrow.clockwise", help: state.showsPool ? "Refresh all accounts" : "Refresh now",
+                             busy: state.isRefreshing) {
+                    state.refreshNow()
                 }
-                NSApp.terminate(nil)
-            }
+                .keyboardShortcut("r")
+                FooterButton(symbol: "gearshape", help: "Settings") {
+                    openSettings()
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .keyboardShortcut(",")
+                FooterButton(symbol: "power", help: "Quit cclimit") {
+                    // AppKit refuses to quit while a window shows a sheet. Quit means quit.
+                    for window in NSApp.windows {
+                        if let sheet = window.attachedSheet { window.endSheet(sheet) }
+                    }
+                    NSApp.terminate(nil)
+                }
                 .keyboardShortcut("q")
             }
         }
     }
 }
 
-/// Groups the footer buttons in one glass container on macOS 26, so they render and
-/// blend as a set.
+/// The footer's icon row. Plain icons, tight spacing, like the Wi-Fi and Battery menus.
 private struct FooterButtons<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) { content }
-            }
-        } else {
-            HStack(spacing: 4) { content }
-        }
+        HStack(spacing: 2) { content }
     }
 }
 
@@ -188,8 +181,8 @@ private struct Module<Content: View>: View {
     }
 }
 
-/// A round icon button. On macOS 26 and later it is a Liquid Glass button, like the
-/// controls in Control Center. Earlier systems get a plain icon with a hover circle.
+/// A monochrome icon button: no chrome at rest, a quiet circle on hover and press.
+/// Glass circles crowded the glyphs and drew heavy rims on macOS 27.
 private struct FooterButton: View {
     let symbol: String
     let help: String
@@ -198,36 +191,35 @@ private struct FooterButton: View {
     let action: () -> Void
     @State private var hovering = false
 
-    @ViewBuilder private var icon: some View {
-        if busy {
-            ProgressView().controlSize(.mini)
-        } else {
-            Image(systemName: symbol)
-        }
-    }
-
     var body: some View {
-        if #available(macOS 26.0, *) {
-            Button(action: action) {
-                icon
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 16, height: 16)
+        Button(action: action) {
+            Group {
+                if busy {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(hovering ? .primary : .secondary)
+                }
             }
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .controlSize(.small)
-            .help(help)
-        } else {
-            Button(action: action) {
-                icon
-                    .frame(width: 24, height: 24)
-                    .background(Circle().fill(hovering ? Color.primary.opacity(0.1) : .clear))
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-            .help(help)
+            .frame(width: 26, height: 26)
+            .contentShape(Circle())
         }
+        .buttonStyle(FooterButtonStyle(hovering: hovering))
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+}
+
+private struct FooterButtonStyle: ButtonStyle {
+    let hovering: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Circle().fill(Color.primary.opacity(
+                    configuration.isPressed ? 0.16 : hovering ? 0.08 : 0)))
+            .animation(.easeOut(duration: 0.12), value: hovering)
     }
 }
 
